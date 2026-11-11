@@ -100,6 +100,7 @@ If you interrupt `junban run` itself, with Ctrl-C for example, the command it is
 
 - Jobs start in the order they were submitted. Until the CPUs needed by the first job in the queue are free, the jobs behind it do not start. This keeps a large job from waiting forever while small jobs keep going ahead of it.
 - `junban run a && b` puts only `a` in the queue. To queue both, write `junban run sh -c 'a && b'`.
+- You cannot call `junban run` from inside a job that junban is running. It fails with an error (exit status 125). This keeps a job from waiting for itself and blocking the queue.
 - If a command exits and leaves child processes running in the background, `junban run` does not return until they finish.
 - The exit status of `junban run` is the exit status of the command. For junban's own errors, such as not being able to reach the queue or a bad argument, it returns 125.
 - macOS does not go to sleep while there are jobs in the queue.
