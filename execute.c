@@ -115,6 +115,7 @@ static void run_child(int ready_fd, int gate)
 {
     struct timeval starttv;
     char token;
+    char jobid[32];
     ssize_t n;
 
     if (setpgid(0, 0) < 0) _exit(125);
@@ -127,6 +128,10 @@ static void run_child(int ready_fd, int gate)
     close(gate);
     if (n != 1) _exit(125);
     restore_sigmask();
+
+    snprintf(jobid, sizeof(jobid), "%d", command_line.jobid);
+    if (setenv("JUNBAN_JOB_ID", jobid, 1) < 0)
+        error("cannot set job environment: %s", strerror(errno));
 
     /* The group was created before the parent registered it with the server. */
     execvp(command_line.command.array[0], command_line.command.array);

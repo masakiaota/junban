@@ -108,6 +108,9 @@ int main(int argc, char **argv)
         return 0;
     }
     if (!strcmp(argv[1], "run")) {
+        const char *jobid = getenv("JUNBAN_JOB_ID");
+        if (jobid)
+            error("'junban run' cannot be called inside a junban job (job %s)", jobid);
         command_line.request = c_QUEUE;
         /* Parse only the prefix; never permute the command's arguments. */
         while (i < argc && argv[i][0] == '-') {

@@ -239,6 +239,22 @@ class QueueTests(unittest.TestCase):
             self.assertEqual(p.communicate(timeout=3), (b"O2\n", b"E2\n"))
             self.assertEqual(p.returncode, 0)
 
+    def test_nested_run_is_refused(self):
+        with Queue() as q:
+            # Record execution while keeping the inner invocation `run true`.
+            command = q.path / "true"
+            command.write_text("#!/bin/sh\n: > ran\n")
+            command.chmod(0o755)
+            env = dict(q.env, PATH=str(q.path) + os.pathsep + os.defpath)
+            result = q.call("run", PY, "-c",
+                            "import subprocess, sys; "
+                            "sys.exit(subprocess.run([sys.argv[1], 'run', 'true'], "
+                            "timeout=3).returncode)", BIN, env=env)
+            self.assertEqual(result[0], 125, result)
+            self.assertFalse((q.path / "ran").exists())
+            self.assertEqual(q.call("run", "true", env=env), (0, b"", b""))
+            self.assertTrue((q.path / "ran").exists())
+
     def test_tty(self):
         with Queue() as q:
             q.call("ls")
