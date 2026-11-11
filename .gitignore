@@ -1,0 +1,5 @@
+# Modified for junban in 2026 by junban contributors.
+*.o
+/junban
+/tests/.tmp/
+/tests/__pycache__/

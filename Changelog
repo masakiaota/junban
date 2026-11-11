@@ -1,3 +1,11 @@
+junban — November 2026:
+Modified for junban in 2026 by junban contributors.
+Derived from task-spooler 1.0.4. Added foreground execution, strict FIFO CPU-slot
+scheduling, process-group lifetime tracking, per-user queue locking, estimates,
+agent-readable listings and wait notifications, a terminal watch view, and macOS
+idle-sleep prevention. Removed the old command-line interface and obsolete
+packaging, output capture, mail, dependencies, and queue-reordering features.
+
 ## Features to be implemented
 
 Doubtful tasks:

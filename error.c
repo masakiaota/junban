@@ -1,4 +1,5 @@
 /*
+    Modified for junban in 2026 by junban contributors.
     Task Spooler - a task queue system for the unix user
     Copyright (C) 2007-2009  Lluís Batlle i Rossell
 
@@ -126,24 +127,7 @@ static void problem(enum Etype type, const char *str, va_list ap)
     fclose(out);
 }
 
-static void problem_msg(enum Etype type, const struct msg *m, const char *str, va_list ap)
-{
-    FILE *out;
-
-    out = open_error_file();
-    if (out == 0)
-        return;
-
-    /* out is ready */
-    print_error(out, type, str, ap);
-    msgdump(out, m);
-    dump_structs(out);
-
-    /* this will close the fd also */
-    fclose(out);
-}
-
-void error(const char *str, ...)
+_Noreturn void error(const char *str, ...)
 {
     va_list ap;
 
@@ -153,24 +137,12 @@ void error(const char *str, ...)
 
     if (process_type == CLIENT)
     {
+        fputs("junban: ", stderr);
         vfprintf(stderr, str, ap);
         fputc('\n', stderr);
     }
-
-    problem(ERROR, str, ap);
-    exit(-1);
-}
-
-void error_msg(const struct msg *m, const char *str, ...)
-{
-    va_list ap;
-
-    va_start(ap, str);
-
-    real_errno = errno;
-
-    problem_msg(ERROR, m, str, ap);
-    exit(-1);
+    va_end(ap);
+    exit(125);
 }
 
 void warning(const char *str, ...)
@@ -184,24 +156,12 @@ void warning(const char *str, ...)
     problem(WARNING, str, ap);
 }
 
-void warning_msg(const struct msg *m, const char *str, ...)
-{
-    va_list ap;
-
-    va_start(ap, str);
-
-    real_errno = errno;
-
-    problem_msg(WARNING, m, str, ap);
-}
-
 static void dump_structs(FILE *out)
 {
     dump_proc_info(out);
     if (process_type == SERVER)
     {
         dump_jobs_struct(out);
-        dump_notifies_struct(out);
         dump_conns_struct(out);
     }
 }

@@ -1,61 +1,26 @@
-PREFIX?=/usr/local
-GLIBCFLAGS=-D_XOPEN_SOURCE=500 -D__STRICT_ANSI__
-CPPFLAGS+=$(GLIBCFLAGS)
-CFLAGS?=-pedantic -ansi -Wall -g -O0
-OBJECTS=main.o \
-	server.o \
-	server_start.o \
-	client.o \
-	msgdump.o \
-	jobs.o \
-	execute.o \
-	msg.o \
-	mail.o \
-	error.o \
-	signals.o \
-	list.o \
-	print.o \
-	info.o \
-	env.o \
-	tail.o
-INSTALL=install -c
+# Modified for junban in 2026 by junban contributors.
+PREFIX ?= /usr/local
+CPPFLAGS += -D_POSIX_C_SOURCE=200809L
+CFLAGS ?= -std=c11 -Wall -Wextra -g -O2
+OBJECTS = main.o visibility.o watch.o platform.o server.o server_start.o \
+          client.o jobs.o execute.o msg.o error.o signals.o
 
-all: ts
+junban: $(OBJECTS)
+	$(CC) $(LDFLAGS) -o $@ $(OBJECTS) $(LDLIBS)
 
-tsretry: tsretry.c
+%.o: %.c main.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
-ts: $(OBJECTS)
-	$(CC) $(LDFLAGS) -o ts $^
+.PHONY: test install uninstall clean
+test: junban
+	python3 tests/test_queue.py
 
-# Test our 'tail' implementation.
-ttail: tail.o ttail.o
-	$(CC) $(LDFLAGS) -o ttail $^
+install: junban
+	install -d "$(PREFIX)/bin"
+	install -m 755 junban "$(PREFIX)/bin/junban"
 
-
-.c.o:
-	$(CC) $(CFLAGS) $(CPPFLAGS) -c $<
-
-# Dependencies
-main.o: main.c main.h
-server_start.o: server_start.c main.h
-server.o: server.c main.h
-client.o: client.c main.h
-msgdump.o: msgdump.c main.h
-jobs.o: jobs.c main.h
-execute.o: execute.c main.h
-msg.o: msg.c main.h
-mail.o: mail.c main.h
-error.o: error.c main.h
-signals.o: signals.c main.h
-list.o: list.c main.h
-tail.o: tail.c main.h
-ttail.o: ttail.c main.h
+uninstall:
+	rm -f "$(PREFIX)/bin/junban"
 
 clean:
-	rm -f *.o ts
-
-install: ts
-	$(INSTALL) -d $(PREFIX)/bin
-	$(INSTALL) ts $(PREFIX)/bin
-	$(INSTALL) -d $(PREFIX)/share/man/man1
-	$(INSTALL) -m 644 ts.1 $(PREFIX)/share/man/man1
+	rm -f *.o junban

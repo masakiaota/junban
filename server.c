@@ -1,4 +1,5 @@
 /*
+    Modified for junban in 2026 by junban contributors.
     Task Spooler - a task queue system for the unix user
     Copyright (C) 2007-2013  Lluís Batlle i Rossell
 
@@ -52,6 +53,7 @@ struct Client_conn
     int socket;
     int hasjob;
     int jobid;
+    int notice_pending;
 };
 
 /* Globals */
@@ -62,6 +64,7 @@ static int max_descriptors;
 
 /* in jobs.c */
 extern int max_jobs;
+extern int max_slots;
 
 static void s_send_version(int s)
 {
@@ -75,39 +78,12 @@ static void s_send_version(int s)
 
 static void sigterm_handler(int n)
 {
-    const char *dumpfilename;
-    int fd;
-
-    /* Dump the job list if we should to */
-    dumpfilename = getenv("TS_SAVELIST");
-    if (dumpfilename != NULL)
-    {
-        fd = open(dumpfilename, O_WRONLY | O_APPEND | O_CREAT, 0600);
-        if (fd != -1)
-        {
-            joblist_dump(fd);
-            close(fd);
-        } else
-            warning("The TS_SAVELIST file \"%s\" cannot be opened",
-                    dumpfilename);
-    }
-
-    /* path will be initialized for sure, before installing the handler */
+    (void)n;
+    /* kill/waitpid in this cleanup are async-signal-safe. Stop even if a
+     * client has left the server blocked in a partial protocol read. */
+    stop_sleep_prevention();
     unlink(path);
-    exit(1);
-}
-
-static void set_default_maxslots()
-{
-    char *str;
-
-    str = getenv("TS_SLOTS");
-    if (str != NULL)
-    {
-        int slots;
-        slots = abs(atoi(str));
-        s_set_max_slots(slots);
-    }
+    _exit(0);
 }
 
 static void install_sigterm_handler()
@@ -124,24 +100,14 @@ static void install_sigterm_handler()
 
 static int get_max_descriptors()
 {
-    const int MARGIN = 5; /* stdin, stderr, listen socket, and whatever */
+    const int MARGIN = 8; /* stdio, lock, listener, startup pipe, rejection FD */
     int max;
     struct rlimit rlim;
     int res;
-    const char *str;
 
     max = MAXCONN;
 
-    str = getenv("TS_MAXCONN");
-    if (str != NULL)
-    {
-        int user_maxconn;
-        user_maxconn = abs(atoi(str));
-        if (max > user_maxconn)
-            max = user_maxconn;
-    }
-
-    if (max > FD_SETSIZE)
+    if (max > FD_SETSIZE - MARGIN)
         max = FD_SETSIZE - MARGIN;
 
     /* I'd like to use OPEN_MAX or NR_OPEN, but I don't know if any
@@ -152,11 +118,11 @@ static int get_max_descriptors()
         warning("getrlimit for open files");
     else
     {
-        if (max > rlim.rlim_cur)
+        if ((rlim_t)(max + MARGIN) > rlim.rlim_cur)
             max = rlim.rlim_cur - MARGIN;
     }
 
-    if (max < 1)
+    if (max < 6)
         error("Too few opened descriptors available");
 
     return max;
@@ -164,8 +130,6 @@ static int get_max_descriptors()
 
 void server_main(int notify_fd, char *_path, int ls)
 {
-    char *dirpath;
-
     process_type = SERVER;
     max_descriptors = get_max_descriptors();
 
@@ -175,17 +139,15 @@ void server_main(int notify_fd, char *_path, int ls)
 
     path = _path;
 
-    /* Move the server to the socket directory */
-    dirpath = malloc(strlen(path)+1);
-    strcpy(dirpath, path);
-    chdir(dirname(dirpath));
-    free(dirpath);
+    /* Keep the startup cwd: JUNBAN_SOCKET may be relative. */
+    if (ls >= FD_SETSIZE) error("too many inherited file descriptors");
 
     nconnections = 0;
 
     install_sigterm_handler();
+    atexit(stop_sleep_prevention);
 
-    set_default_maxslots();
+    s_set_max_slots(detect_slots());
 
     notify_parent(notify_fd);
 
@@ -211,11 +173,10 @@ static void server_loop(int ls)
 
     while (keep_loop)
     {
+        struct timeval interval = {0, 100000};
         FD_ZERO(&readset);
         maxfd = 0;
-        /* If we can accept more connections, go on.
-         * Otherwise, the system block them (no accept will be done). */
-        if (nconnections < max_descriptors)
+        /* Always accept, including at capacity, to reject explicitly. */
         {
             FD_SET(ls,&readset);
             maxfd = ls;
@@ -226,18 +187,38 @@ static void server_loop(int ls)
             if (client_cs[i].socket > maxfd)
                 maxfd = client_cs[i].socket;
         }
-        select(maxfd + 1, &readset, NULL, NULL, NULL);
+        if (select(maxfd + 1, &readset, NULL, NULL,
+                   s_needs_poll() ? &interval : NULL) < 0) {
+            if (errno == EINTR) continue;
+            error("queue select failed");
+        }
         if (FD_ISSET(ls,&readset))
         {
             int cs;
             cs = accept(ls, NULL, NULL);
-            if (cs == -1)
-                error("Accepting from %i", ls);
-            client_cs[nconnections].hasjob = 0;
-            client_cs[nconnections].socket = cs;
-            ++nconnections;
+            if (cs >= 0) {
+                struct timeval timeout = {3, 0};
+                if (setsockopt(cs, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0 ||
+                    setsockopt(cs, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout)) < 0) {
+                    close(cs);
+                    continue;
+                }
+                if (nconnections >= max_descriptors || cs >= FD_SETSIZE) {
+                    struct msg full = {0};
+                    full.type = NEWJOB_NOK;
+                    send_msg(cs, &full);
+                    close(cs);
+                } else {
+                    client_cs[nconnections].hasjob = 0;
+                    client_cs[nconnections].notice_pending = 0;
+                    fcntl(cs, F_SETFD, FD_CLOEXEC);
+                    client_cs[nconnections].socket = cs;
+                    ++nconnections;
+                }
+            }
         }
-        for(i=0; i< nconnections; ++i)
+        /* Descend because handling a request can remove a connection. */
+        for(i=nconnections-1; i >= 0; --i)
             if (FD_ISSET(client_cs[i].socket, &readset))
             {
                 enum Break b;
@@ -251,24 +232,29 @@ static void server_loop(int ls)
                     clean_after_client_disappeared(client_cs[i].socket, i);
                 }
                 else if (b == BREAK)
+                {
                     keep_loop = 0;
+                    break;
+                }
             }
+        s_poll_jobs();
+        /* Acquire the idle-sleep assertion before granting any run permission. */
+        prevent_sleep(keep_loop && s_has_jobs());
         /* This will return firstjob->jobid or -1 */
-        newjob = next_run_job();
-        if (newjob != -1)
+        while (keep_loop && (newjob = next_run_job()) != -1)
         {
-            int conn, awaken_job;
+            int conn;
             conn = get_conn_of_jobid(newjob);
             /* This next marks the firstjob state to RUNNING */
             s_mark_job_running(newjob);
             s_runjob(newjob, conn);
 
-            while ((awaken_job = wake_hold_client()) != -1)
-            {
-                int wake_conn = get_conn_of_jobid(awaken_job);
-                if (wake_conn == -1)
-                    error("The job awaken does not have a connection open");
-                s_newjob_ok(wake_conn);
+
+        }
+        for (i = 0; i < nconnections; ++i) {
+            if (client_cs[i].notice_pending) {
+                s_wait_notice(client_cs[i].socket, client_cs[i].jobid);
+                client_cs[i].notice_pending = 0;
             }
         }
     }
@@ -278,6 +264,7 @@ static void server_loop(int ls)
 
 static void end_server(int ls)
 {
+    stop_sleep_prevention();
     close(ls);
     unlink(path);
     /* This comes from the parent, in the fork after server_main.
@@ -288,11 +275,6 @@ static void end_server(int ls)
 static void remove_connection(int index)
 {
     int i;
-
-    if(client_cs[index].hasjob)
-    {
-        s_removejob(client_cs[index].jobid);
-    }
 
     for(i=index; i<(nconnections-1); ++i)
     {
@@ -308,29 +290,12 @@ clean_after_client_disappeared(int socket, int index)
     int jobid = client_cs[index].jobid;
     if (client_cs[index].hasjob)
     {
-        struct Result r;
-
-        r.errorlevel = -1;
-        r.died_by_signal = 1;
-        r.signal = SIGKILL;
-        r.user_ms = 0;
-        r.system_ms = 0;
-        r.real_ms = 0;
-        r.skipped = 0;
-
-        warning("JobID %i quit while running.", jobid);
-        job_finished(&r, jobid);
-        /* For the dependencies */
-        check_notify_list(jobid);
+        s_terminate_job(jobid);
         /* We don't want this connection to do anything
          * more related to the jobid, secially on remove_connection
          * when we receive the EOC. */
         client_cs[index].hasjob = 0;
     }
-    else
-        /* If it doesn't have a running job,
-         * it may well be a notification */
-        s_remove_notification(socket);
 
     close(socket);
     remove_connection(index);
@@ -365,12 +330,25 @@ static enum Break
         case KILL_SERVER:
             return BREAK; /* break in the parent*/
             break;
+        case SNAPSHOT:
+            s_snapshot(s, m.u.size);
+            break;
+        case WAIT_NOTICE:
+            if (client_cs[index].hasjob)
+                s_wait_notice(s, client_cs[index].jobid);
+            break;
         case NEWJOB:
+            if (client_cs[index].hasjob || m.u.newjob.command_size < 1 ||
+                m.u.newjob.num_slots < 0 ||
+                m.u.newjob.num_slots > max_slots)
+                return CLOSE;
             client_cs[index].jobid = s_newjob(s, &m);
+            if (client_cs[index].jobid < 0) return CLOSE;
             client_cs[index].hasjob = 1;
+            client_cs[index].notice_pending = 1;
             if (!job_is_holding_client(client_cs[index].jobid))
                 s_newjob_ok(index);
-            else if (!m.u.newjob.wait_enqueuing)
+            else
             {
                 s_newjob_nok(index);
                 clean_after_client_disappeared(s, index);
@@ -378,92 +356,34 @@ static enum Break
             break;
         case RUNJOB_OK:
             {
-                char *buffer = 0;
-                if (m.u.output.store_output)
-                {
-                    /* Receive the output filename */
-                    buffer = (char *) malloc(m.u.output.ofilename_size);
-                    res = recv_bytes(s, buffer,
-                        m.u.output.ofilename_size);
-                    if (res != m.u.output.ofilename_size)
-                        error("Reading the ofilename");
-                }
-                s_process_runjob_ok(client_cs[index].jobid, buffer,
-                        m.u.output.pid);
+                s_process_runjob_ok(client_cs[index].jobid, m.u.output.pid);
+                m.type = RUNJOB_ACK;
+                send_msg(s, &m);
             }
             break;
-        case LIST:
-            s_list(s);
-            /* We must actively close, meaning End of Lines */
-            close(s);
-            remove_connection(index);
-            break;
-        case INFO:
-            s_job_info(s, m.u.jobid);
-            close(s);
-            remove_connection(index);
+        case KILL_JOB:
+            {
+                int target = get_conn_of_jobid(m.u.jobid);
+                int state = s_kill_job(m.u.jobid);
+                struct msg reply = {0};
+                reply.type = state ? KILL_JOB_OK : NEWJOB_NOK;
+                send_msg(s, &reply);
+                if (state == 2 && target >= 0) {
+                    reply.type = JOB_REMOVED;
+                    send_msg(client_cs[target].socket, &reply);
+                    shutdown(client_cs[target].socket, SHUT_RDWR);
+                }
+            }
             break;
         case ENDJOB:
-            job_finished(&m.u.result, client_cs[index].jobid);
-            /* For the dependencies */
-            check_notify_list(client_cs[index].jobid);
+            s_end_job(&m.u.result, client_cs[index].jobid);
             /* We don't want this connection to do anything
              * more related to the jobid, secially on remove_connection
              * when we receive the EOC. */
             client_cs[index].hasjob = 0;
             break;
-        case CLEAR_FINISHED:
-            s_clear_finished();
-            break;
-        case ASK_OUTPUT:
-            s_send_output(s, m.u.jobid);
-            break;
-        case REMOVEJOB:
-            {
-                int went_ok;
-                /* Will update the jobid. If it's -1, will set the jobid found */
-                went_ok = s_remove_job(s, &m.u.jobid);
-                if (went_ok)
-                {
-                    int i;
-                    for(i = 0; i < nconnections; ++i)
-                    {
-                        if (client_cs[i].hasjob && client_cs[i].jobid == m.u.jobid)
-                        {
-                            close(client_cs[i].socket);
-
-                            /* So remove_connection doesn't call s_removejob again */
-                            client_cs[i].hasjob = 0;
-
-                            /* We don't try to remove any notification related to
-                             * 'i', because it will be for sure a ts client for a job */
-                            remove_connection(i);
-                        }
-                    }
-                }
-            }
-            break;
-        case WAITJOB:
-            s_wait_job(s, m.u.jobid);
-            break;
-        case WAIT_RUNNING_JOB:
-            s_wait_running_job(s, m.u.jobid);
-            break;
-        case URGENT:
-            s_move_urgent(s, m.u.jobid);
-            break;
-        case SET_MAX_SLOTS:
-            s_set_max_slots(m.u.max_slots);
-            break;
         case GET_MAX_SLOTS:
             s_get_max_slots(s);
-            break;
-        case SWAP_JOBS:
-            s_swap_jobs(s, m.u.swap.jobid1,
-                    m.u.swap.jobid2);
-            break;
-        case GET_STATE:
-            s_send_state(s, m.u.jobid);
             break;
         case GET_VERSION:
             s_send_version(s);
