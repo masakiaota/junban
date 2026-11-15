@@ -244,6 +244,7 @@ int main(int argc, char **argv)
     ensure_server_up();
     /* KILL_SERVER keeps its message number, so shutdown also stops a server
      * of another protocol version, as needed when upgrading junban. */
+    if (command_line.request == c_WAIT) c_wait_prepare();
     if (command_line.request != c_KILL_SERVER) c_check_version();
     switch (command_line.request) {
     case c_QUEUE:

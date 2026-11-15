@@ -1059,6 +1059,58 @@ class VisibilityOnlyTests(unittest.TestCase):
             finally:
                 listener.close()
 
+    def test_review_fixes_logs_kill_and_handshake(self):
+        with Queue(2) as q:
+            # A planted symlink in the log directory is not followed.
+            q.call("ls")
+            (q.path / "logs").mkdir(mode=0o755)
+            victim = q.path / "victim"
+            victim.write_text("keep")
+            (q.path / "logs" / "0.log").symlink_to(victim)
+            code, out, err = q.call("run", "--detach", "-c", "1", "true")
+            self.assertEqual(code, 125, err)
+            self.assertIn(b"cannot open job log", err)
+            self.assertEqual(victim.read_text(), "keep")
+            self.assertEqual((q.path / "logs").stat().st_mode & 0o777, 0o700)
+            (q.path / "logs" / "0.log").unlink()
+            (q.path / "logs").rmdir()
+            (q.path / "logs").symlink_to(q.path)
+            self.own_failure(q.call("run", "--detach", "-c", "1", "true"), "owned by this user")
+            (q.path / "logs").unlink()
+            # With stdin closed the queue connection survives detaching.
+            code, out, err = q.call("run", "--detach", "-c", "1", "true",
+                                    stdin=None, preexec_fn=lambda: os.close(0))
+            self.assertEqual(code, 0, err)
+            job = out.decode().strip()
+            eventually(lambda: " exit=0 " in q.call("ls", "-a", "--id", job)[1].decode())
+            # kill --tag from inside a tagged job stops the other jobs too.
+            killer = q.popen("run", "-c", "1", "--tag", "t", "sh", "-c",
+                             "while [ ! -f other.pids ]; do sleep 0.02; done; "
+                             + BIN + " kill --tag t; sleep 5")
+            other = q.popen("run", "-c", "1", "--tag", "t", PY, WORKER, "hold",
+                            "other.pids", "other.release")
+            q.pids("other")
+            self.assertEqual(other.wait(timeout=5), 143)
+            self.assertEqual(killer.wait(timeout=5), 143)
+
+    def test_wait_timeout_covers_handshake(self):
+        with Queue() as q:
+            listener = socket.socket(socket.AF_UNIX)
+            listener.bind(os.path.relpath(q.path / "s"))
+            listener.listen(1)
+            try:
+                started = time.monotonic()
+                p = q.popen("wait", "--timeout", "1s", "0")
+                connection, _ = listener.accept()
+                with connection:
+                    self.assertEqual(receive_message(connection)[0], TYPES["GET_VERSION"])
+                    out, err = p.communicate(timeout=5)
+                self.assertEqual((p.returncode, out), (124, b""))
+                self.assertIn(b"timed out", err)
+                self.assertLess(time.monotonic() - started, 3)
+            finally:
+                listener.close()
+
     def test_estimate_parsing_and_units(self):
         with Queue() as q:
             for value in ("", "1", "s", "0s", "-1m", "+1s", "1.5h", "1ms", "1w",

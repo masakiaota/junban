@@ -5,6 +5,12 @@
 
     Please find the license in the provided COPYING file.
 */
+/* O_NOFOLLOW is a platform extension to POSIX.1-2008 here. */
+#if defined(__APPLE__)
+#define _DARWIN_C_SOURCE
+#elif defined(__linux__)
+#define _DEFAULT_SOURCE
+#endif
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
@@ -24,6 +30,10 @@
 #include "main.h"
 
 static void c_end_of_job(const struct Result *res);
+static double wait_deadline; /* Zero: junban wait has no timeout. */
+static int wait_self = -1;    /* The calling job's ID inside a junban job. */
+static _Noreturn void wait_request_failed(void);
+static void wait_io_timeout(void);
 
 char *build_command_string()
 {
@@ -213,6 +223,7 @@ void c_check_version()
     send_msg(server_socket, &m);
 
     res = recv_msg(server_socket, &m);
+    if (res != sizeof(m) && wait_deadline) wait_request_failed();
     if(res != sizeof(m))
         error("queue disconnected during handshake");
     if (m.type == NEWJOB_NOK)
@@ -267,32 +278,47 @@ void c_kill_job()
         error("unknown job ID");
 }
 
+/* 1 when the queue accepted the request to stop the job. */
+static int kill_one(int jobid)
+{
+    struct msg m = {0};
+    m.type = KILL_JOB;
+    m.u.jobid = jobid;
+    send_msg(server_socket, &m);
+    if (recv_msg(server_socket, &m) != sizeof(m))
+        error("queue disconnected during kill");
+    /* A job that ended since the listing needs no stopping. */
+    return m.type == KILL_JOB_OK;
+}
+
 /* Stop every running or queued job carrying the tag. Returns how many. */
 int c_kill_tag(void)
 {
     struct Snapshot snapshot = {0};
-    int killed = 0;
+    int killed = 0, self = -1, self_matched = 0;
+    const char *job = getenv("JUNBAN_JOB_ID");
+    if (job) self = atoi(job);
     if (!fetch_snapshot(&snapshot)) error("queue disconnected while listing");
     for (size_t i = 0; i < snapshot.count; ++i) {
         const struct Job_view *v = &snapshot.jobs[i];
-        struct msg m = {0};
         if ((v->state != RUNNING && v->state != QUEUED) || !job_selected(v)) continue;
-        m.type = KILL_JOB;
-        m.u.jobid = v->jobid;
-        send_msg(server_socket, &m);
-        if (recv_msg(server_socket, &m) != sizeof(m))
-            error("queue disconnected during kill");
-        /* A job that ended since the listing needs no stopping. */
-        if (m.type == KILL_JOB_OK) ++killed;
+        /* Stopping the calling job also stops this client, so do that last. */
+        if (v->jobid == self) self_matched = 1;
+        else killed += kill_one(v->jobid);
     }
     free(snapshot.jobs);
+    if (self_matched) killed += kill_one(self);
     return killed;
 }
 
-/* Detached logs live next to the queue socket: <socket dir>/logs/ID.log. */
+/* Detached logs live next to the queue socket: <socket dir>/logs/ID.log.
+ * The socket may be in a shared directory, so the log directory must be
+ * this user's own and private, and logs are opened without following
+ * symlinks. */
 char *c_log_prefix(void)
 {
     char *path, *slash, *dir, *prefix;
+    struct stat st;
     create_socket_path(&path);
     slash = strrchr(path, '/');
     if (slash) {
@@ -307,6 +333,10 @@ char *c_log_prefix(void)
     free(dir);
     if (mkdir(prefix, 0700) < 0 && errno != EEXIST)
         error("cannot create log directory %s: %s", prefix, strerror(errno));
+    if (lstat(prefix, &st) < 0 || !S_ISDIR(st.st_mode) || st.st_uid != getuid())
+        error("log directory %s must be a directory owned by this user", prefix);
+    if ((st.st_mode & 0777) != 0700 && chmod(prefix, 0700) < 0)
+        error("cannot secure log directory %s: %s", prefix, strerror(errno));
     strcat(prefix, "/");
     return prefix;
 }
@@ -320,10 +350,22 @@ void c_detach(void)
     struct rlimit lim;
     if (!log) error("out of memory");
     sprintf(log, "%s%d.log", command_line.log_prefix, command_line.jobid);
-    fd = open(log, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    /* Keep the queue connection off 0-2, which are replaced below; the
+     * caller may have started junban with stdin, stdout or stderr closed. */
+    if (server_socket <= STDERR_FILENO) {
+        int moved = fcntl(server_socket, F_DUPFD_CLOEXEC, STDERR_FILENO + 1);
+        if (moved < 0) error("cannot keep queue connection: %s", strerror(errno));
+        close(server_socket);
+        server_socket = moved;
+    }
+    fd = open(log, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0600);
     if (fd < 0) error("cannot open job log %s: %s", log, strerror(errno));
     nullfd = open("/dev/null", O_RDONLY);
     if (nullfd < 0) error("cannot open /dev/null: %s", strerror(errno));
+    /* dup2 onto 0-2 below must not overwrite one of these. */
+    if (fd <= STDERR_FILENO) fd = fcntl(fd, F_DUPFD, STDERR_FILENO + 1);
+    if (nullfd <= STDERR_FILENO) nullfd = fcntl(nullfd, F_DUPFD, STDERR_FILENO + 1);
+    if (fd < 0 || nullfd < 0) error("cannot open job log: %s", strerror(errno));
     fflush(NULL);
     pid = fork();
     if (pid < 0) error("cannot detach: %s", strerror(errno));
@@ -343,9 +385,6 @@ void c_detach(void)
             if (i != server_socket) close(i);
     free(log);
 }
-
-static double wait_deadline; /* Zero: junban wait has no timeout. */
-static int wait_self = -1;    /* The calling job's ID inside a junban job. */
 
 /* A queue request of junban wait failed or ran into the timeout. */
 static _Noreturn void wait_request_failed(void)
@@ -372,6 +411,15 @@ static void wait_io_timeout(void)
     if (timeout.tv_usec >= 1000000) { ++timeout.tv_sec; timeout.tv_usec -= 1000000; }
     setsockopt(server_socket, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
     setsockopt(server_socket, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+}
+
+/* Start the timeout of junban wait before the first queue request. */
+void c_wait_prepare(void)
+{
+    const char *self = getenv("JUNBAN_JOB_ID");
+    if (command_line.timeout) wait_deadline = monotime() + (double)command_line.timeout;
+    if (self) wait_self = atoi(self);
+    wait_io_timeout();
 }
 
 /* 1 with the job's view, 0 for an ID the queue does not know. */
@@ -435,10 +483,7 @@ int c_wait(void)
 {
     struct Target *targets = NULL;
     int count = 0, size = 0, status = 0, scanned = 0;
-    const char *self = getenv("JUNBAN_JOB_ID");
-    double deadline = command_line.timeout ? monotime() + (double)command_line.timeout : 0;
-    wait_deadline = deadline;
-    if (self) wait_self = atoi(self);
+    double deadline = wait_deadline;
     for (int i = 0; i < command_line.num_ids; ++i)
         add_target(&targets, &count, &size, command_line.ids[i]);
     if (command_line.num_tags) {

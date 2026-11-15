@@ -230,6 +230,7 @@ void c_kill_job();
 int c_kill_tag(void);
 char *c_log_prefix(void);
 void c_detach(void);
+void c_wait_prepare(void);
 int c_wait(void);
 void c_get_max_slots();
 
