@@ -6,6 +6,7 @@
 #include <time.h>
 #include <sys/time.h>
 #include "main.h"
+#include "unicode_tables.h"
 
 double monotime(void)
 {
@@ -54,22 +55,27 @@ static int utf8_char(const unsigned char *s, unsigned *code)
     return n;
 }
 
-/* Terminal columns of a character: 2 for East Asian wide and fullwidth
- * forms, 0 for common combining marks, 1 otherwise. */
+static int in_table(const struct Unicode_range *table, size_t count, unsigned c)
+{
+    size_t low = 0, high = count;
+    while (low < high) {
+        size_t mid = (low + high) / 2;
+        if (c < table[mid].first) high = mid;
+        else if (c > table[mid].last) low = mid + 1;
+        else return 1;
+    }
+    return 0;
+}
+
+#define IN_TABLE(table, c) in_table(table, sizeof(table) / sizeof(table[0]), c)
+
+/* Terminal columns of a character, from the Unicode tables: 0 for
+ * combining marks and format characters, 2 for East Asian wide and
+ * fullwidth characters (emoji included), 1 otherwise. */
 static int char_columns(unsigned c)
 {
-    if ((c >= 0x300 && c <= 0x36f) || (c >= 0x200b && c <= 0x200f) ||
-        c == 0x3099 || c == 0x309a || (c >= 0xfe00 && c <= 0xfe0f))
-        return 0;
-    if ((c >= 0x1100 && c <= 0x115f) || (c >= 0x2e80 && c <= 0x303e) ||
-        (c >= 0x3041 && c <= 0x33ff) || (c >= 0x3400 && c <= 0x4dbf) ||
-        (c >= 0x4e00 && c <= 0x9fff) || (c >= 0xa000 && c <= 0xa4cf) ||
-        (c >= 0xac00 && c <= 0xd7a3) || (c >= 0xf900 && c <= 0xfaff) ||
-        (c >= 0xfe30 && c <= 0xfe4f) || (c >= 0xff00 && c <= 0xff60) ||
-        (c >= 0xffe0 && c <= 0xffe6) || (c >= 0x1f300 && c <= 0x1f64f) ||
-        (c >= 0x1f900 && c <= 0x1f9ff) || (c >= 0x20000 && c <= 0x3fffd))
-        return 2;
-    return 1;
+    if (IN_TABLE(zero_width_chars, c)) return 0;
+    return IN_TABLE(wide_chars, c) ? 2 : 1;
 }
 
 /* Copy whole characters of src that fit in columns terminal columns, then
@@ -102,9 +108,11 @@ static void safe_text(char *dst, size_t size, const char *src, int label)
         unsigned char c = (unsigned char)*src;
         unsigned code;
         int n;
-        /* Labels keep printable UTF-8 such as Japanese directory names. */
+        /* Labels keep printable UTF-8 such as Japanese directory names, but
+         * not whitespace or line separators, which would split the field or
+         * the line, nor invisible format characters. */
         if (label && c >= 0x80 && (n = utf8_char((const unsigned char *)src, &code)) &&
-            code >= 0xa0) {
+            code >= 0xa0 && !IN_TABLE(label_escaped_chars, code)) {
             if (used + (size_t)n >= size) break;
             memcpy(dst + used, src, (size_t)n);
             used += (size_t)n;

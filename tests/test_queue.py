@@ -1171,9 +1171,15 @@ class VisibilityOnlyTests(unittest.TestCase):
             self.assertIn(b" dir=bad%FF%E6%97 ", out)
 
     def test_watch_wide_directory_names(self):
+        for name, shown in (("日本語のとても長いディレクトリ", "日本語のとても長"),
+                            ("🚀" * 10, "🚀" * 8)):
+            with self.subTest(name=name):
+                self.watch_wide_directory(name, shown)
+
+    def watch_wide_directory(self, name, shown):
         with Queue() as q:
             q.call("ls")
-            directory = q.path / "日本語のとても長いディレクトリ"
+            directory = q.path / name
             directory.mkdir()
             env = dict(q.env, JUNBAN_SOCKET="../s")
             job = q.popen("run", "-c", "1", PY, WORKER, "hold", q.path / "wide.pids",
@@ -1189,7 +1195,7 @@ class VisibilityOnlyTests(unittest.TestCase):
                 p = subprocess.Popen([BIN, "watch"], cwd=q.path, env=q.env, stdin=slave,
                                      stdout=slave, stderr=slave, preexec_fn=controlling_terminal)
                 q.clients.append(p)
-                screen = read_until(master, lambda data: "日本語".encode() in data)
+                screen = read_until(master, lambda data: shown[:2].encode() in data)
                 p.terminate()
                 end = time.monotonic() + 3
                 while p.poll() is None and time.monotonic() < end:
@@ -1207,7 +1213,7 @@ class VisibilityOnlyTests(unittest.TestCase):
             self.assertNotIn("%E", row)
             # The DIR cell holds whole characters within 16 columns, so the
             # CPUS column lines up with its header.
-            self.assertIn(" 日本語のとても長 ", row)
+            self.assertIn(" %s " % shown, row)
             self.assertEqual(columns(header[:header.index("CPUS") + 4]),
                              columns(row[:row.index(" 1 ") + 2]))
             self.assertTrue(all(columns(line) < 60 for line in clean.splitlines()), clean)
@@ -1218,7 +1224,8 @@ class VisibilityOnlyTests(unittest.TestCase):
         with Queue() as q:
             q.call("ls")
             names = ("AHC075-a", "kaggle-x", "space\n\x1b-label", "課題",
-                     "テ\u3099ータ", "c1\u0085-%", "長" * 50)
+                     "テ\u3099ータ", "c1\u0085-%", "長" * 50, "a\u3000b", "l\u2028s",
+                     "bidi\u202e", "🚀")
             for name in names:
                 directory = q.path / name
                 directory.mkdir()
@@ -1232,6 +1239,9 @@ class VisibilityOnlyTests(unittest.TestCase):
             self.assertTrue(any(" dir=課題 " in line for line in lines), lines)
             self.assertTrue(any(" dir=テ\u3099ータ " in line for line in lines), lines)
             self.assertTrue(any(" dir=c1%C2%85-%25 " in line for line in lines), lines)
+            # Unicode whitespace, line separators and format characters too.
+            for encoded in ("a%E3%80%80b", "l%E2%80%A8s", "bidi%E2%80%AE", "🚀"):
+                self.assertTrue(any(" dir=%s " % encoded in line for line in lines), (encoded, lines))
             # Long names are cut on a character boundary.
             self.assertTrue(any(re.search(r" dir=長{40,42}\.\.\. ", line) for line in lines), lines)
             self.assertEqual(self.listing_ids(q, "--dir", "課題"), [3])
