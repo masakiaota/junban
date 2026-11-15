@@ -31,12 +31,86 @@ void format_duration(char *dst, size_t size, unsigned long long seconds)
     }
 }
 
+/* Decode one UTF-8 character. Returns its length in bytes, or 0 when the
+ * bytes are not valid UTF-8 (overlong forms and surrogates included). */
+static int utf8_char(const unsigned char *s, unsigned *code)
+{
+    unsigned c = s[0];
+    int n;
+    if (c < 0x80) { *code = c; return 1; }
+    if (c >= 0xc2 && c <= 0xdf) { n = 2; c &= 0x1f; }
+    else if (c >= 0xe0 && c <= 0xef) { n = 3; c &= 0x0f; }
+    else if (c >= 0xf0 && c <= 0xf4) { n = 4; c &= 0x07; }
+    else return 0;
+    /* A NUL fails the continuation test before any byte past it is read. */
+    for (int i = 1; i < n; ++i) {
+        if ((s[i] & 0xc0) != 0x80) return 0;
+        c = c << 6 | (s[i] & 0x3f);
+    }
+    if ((n == 3 && c < 0x800) || (n == 4 && (c < 0x10000 || c > 0x10ffff)) ||
+        (c >= 0xd800 && c <= 0xdfff))
+        return 0;
+    *code = c;
+    return n;
+}
+
+/* Terminal columns of a character: 2 for East Asian wide and fullwidth
+ * forms, 0 for common combining marks, 1 otherwise. */
+static int char_columns(unsigned c)
+{
+    if ((c >= 0x300 && c <= 0x36f) || (c >= 0x200b && c <= 0x200f) ||
+        c == 0x3099 || c == 0x309a || (c >= 0xfe00 && c <= 0xfe0f))
+        return 0;
+    if ((c >= 0x1100 && c <= 0x115f) || (c >= 0x2e80 && c <= 0x303e) ||
+        (c >= 0x3041 && c <= 0x33ff) || (c >= 0x3400 && c <= 0x4dbf) ||
+        (c >= 0x4e00 && c <= 0x9fff) || (c >= 0xa000 && c <= 0xa4cf) ||
+        (c >= 0xac00 && c <= 0xd7a3) || (c >= 0xf900 && c <= 0xfaff) ||
+        (c >= 0xfe30 && c <= 0xfe4f) || (c >= 0xff00 && c <= 0xff60) ||
+        (c >= 0xffe0 && c <= 0xffe6) || (c >= 0x1f300 && c <= 0x1f64f) ||
+        (c >= 0x1f900 && c <= 0x1f9ff) || (c >= 0x20000 && c <= 0x3fffd))
+        return 2;
+    return 1;
+}
+
+/* Copy whole characters of src that fit in columns terminal columns, then
+ * pad with spaces up to columns when pad is set. Invalid bytes show as '?'. */
+void fit_columns(char *dst, size_t size, const char *src, int columns, int pad)
+{
+    const unsigned char *s = (const unsigned char *)src;
+    size_t used = 0;
+    int width = 0;
+    while (*s) {
+        unsigned code;
+        int n = utf8_char(s, &code), w = n ? char_columns(code) : 1;
+        if (!n) n = 1;
+        if (width + w > columns || used + (size_t)n >= size) break;
+        if (n == 1 && *s >= 0x80) dst[used] = '?';
+        else memcpy(dst + used, s, (size_t)n);
+        used += (size_t)n;
+        width += w;
+        s += n;
+    }
+    while (pad && width < columns && used + 1 < size) { dst[used++] = ' '; ++width; }
+    dst[used] = 0;
+}
+
 static void safe_text(char *dst, size_t size, const char *src, int label)
 {
     size_t used = 0;
     if (!src) src = "-";
     for (; *src && used + 1 < size; ++src) {
         unsigned char c = (unsigned char)*src;
+        unsigned code;
+        int n;
+        /* Labels keep printable UTF-8 such as Japanese directory names. */
+        if (label && c >= 0x80 && (n = utf8_char((const unsigned char *)src, &code)) &&
+            code >= 0xa0) {
+            if (used + (size_t)n >= size) break;
+            memcpy(dst + used, src, (size_t)n);
+            used += (size_t)n;
+            src += n - 1;
+            continue;
+        }
         if (label && (c <= 32 || c >= 127 || c == '%')) {
             if (used + 3 >= size) break;
             snprintf(dst + used, size - used, "%%%02X", c);

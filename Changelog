@@ -24,6 +24,9 @@ v0.1.1 (changes junban ls output and exit status for scripts):
    finish. It exits with their highest exit status, 124 on timeout and 125
    on junban errors. The server now keeps the results of the last 1000
    finished jobs for it; ls -a still shows the newest 20. (#1)
+ - dir= keeps printable UTF-8 such as Japanese directory names instead of
+   writing them as %XX; control characters, spaces, % and invalid bytes are
+   still encoded. junban watch measures columns in terminal cells. (#10)
 
 ## Features to be implemented
 

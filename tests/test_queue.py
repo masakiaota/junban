@@ -23,6 +23,7 @@ import sys
 import tempfile
 import termios
 import time
+import unicodedata
 import unittest
 
 REPO = Path(__file__).resolve().parents[1]
@@ -1130,19 +1131,89 @@ class VisibilityOnlyTests(unittest.TestCase):
                 q.release(str(i))
                 self.assertEqual(p.wait(timeout=3), 0)
 
+    def listing_ids(self, q, *args):
+        code, out, err = q.call("ls", "-a", *args)
+        self.assertEqual((code, err), (0 if out else 1, b""))
+        return [int(line.split()[1][3:]) for line in out.decode().splitlines()]
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux allows invalid UTF-8 names")
+    def test_cwd_label_invalid_utf8(self):
+        with Queue() as q:
+            q.call("ls")
+            directory = os.path.join(os.fsencode(q.path), b"bad\xff\xe6\x97")
+            os.mkdir(directory)
+            env = dict(q.env, JUNBAN_SOCKET="../s")
+            self.assertEqual(q.call("run", "true", cwd=directory, env=env), (0, b"", b""))
+            out = eventually(lambda: q.call("ls", "-a")[1])
+            self.assertIn(b" dir=bad%FF%E6%97 ", out)
+
+    def test_watch_wide_directory_names(self):
+        with Queue() as q:
+            q.call("ls")
+            directory = q.path / "日本語のとても長いディレクトリ"
+            directory.mkdir()
+            env = dict(q.env, JUNBAN_SOCKET="../s")
+            job = q.popen("run", "-c", "1", PY, WORKER, "hold", q.path / "wide.pids",
+                          q.path / "wide.release", cwd=directory, env=env)
+            q.pids("wide")
+            master, slave = pty.openpty()
+            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 60, 0, 0))
+            def controlling_terminal():
+                os.setsid()
+                fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+                os.tcsetpgrp(0, os.getpgrp())
+            try:
+                p = subprocess.Popen([BIN, "watch"], cwd=q.path, env=q.env, stdin=slave,
+                                     stdout=slave, stderr=slave, preexec_fn=controlling_terminal)
+                q.clients.append(p)
+                screen = read_until(master, lambda data: "日本語".encode() in data)
+                p.terminate()
+                end = time.monotonic() + 3
+                while p.poll() is None and time.monotonic() < end:
+                    if select.select([master], [], [], 0.05)[0]:
+                        os.read(master, 65536)
+                self.assertEqual(p.wait(timeout=1), 0)
+            finally:
+                os.close(master)
+                os.close(slave)
+            clean = re.sub(rb"\x1b\[[0-?]*[ -/]*[@-~]", b"", screen).decode().replace("\r", "")
+            def columns(text):
+                return sum(2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in text)
+            rows = clean.split("RUNNING", 1)[1].splitlines()
+            header, row = rows[1], rows[2]
+            self.assertNotIn("%E", row)
+            # The DIR cell holds whole characters within 16 columns, so the
+            # CPUS column lines up with its header.
+            self.assertIn(" 日本語のとても長 ", row)
+            self.assertEqual(columns(header[:header.index("CPUS") + 4]),
+                             columns(row[:row.index(" 1 ") + 2]))
+            self.assertTrue(all(columns(line) < 60 for line in clean.splitlines()), clean)
+            q.release("wide")
+            self.assertEqual(job.wait(timeout=3), 0)
+
     def test_cwd_label(self):
         with Queue() as q:
             q.call("ls")
-            for name in ("AHC075-a", "kaggle-x", "space\n\x1b-label"):
+            names = ("AHC075-a", "kaggle-x", "space\n\x1b-label", "課題",
+                     "テ\u3099ータ", "c1\u0085-%", "長" * 50)
+            for name in names:
                 directory = q.path / name
                 directory.mkdir()
                 env = dict(q.env, JUNBAN_SOCKET="../s")
                 self.assertEqual(q.call("run", "true", cwd=directory, env=env), (0, b"", b""))
-            lines = eventually(lambda: self.listing(q, True) if len(self.listing(q, True)) == 3 else None)
+            lines = eventually(lambda: self.listing(q, True) if len(self.listing(q, True)) == len(names) else None)
             self.assertTrue(any(" dir=AHC075-a " in line for line in lines))
             self.assertTrue(any(" dir=kaggle-x " in line for line in lines))
             self.assertTrue(any(" dir=space%0A%1B-label " in line for line in lines))
+            # Printable UTF-8 stays readable; C1 controls, spaces and % are encoded.
+            self.assertTrue(any(" dir=課題 " in line for line in lines), lines)
+            self.assertTrue(any(" dir=テ\u3099ータ " in line for line in lines), lines)
+            self.assertTrue(any(" dir=c1%C2%85-%25 " in line for line in lines), lines)
+            # Long names are cut on a character boundary.
+            self.assertTrue(any(re.search(r" dir=長{40,42}\.\.\. ", line) for line in lines), lines)
+            self.assertEqual(self.listing_ids(q, "--dir", "課題"), [3])
             self.assertNotIn("\x1b", "\n".join(lines))
+            self.assertNotIn("\u0085", "\n".join(lines))
 
     def test_history_last_20_newest_first(self):
         with Queue() as q:

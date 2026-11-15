@@ -199,6 +199,7 @@ struct Snapshot {
 double monotime(void);
 void format_duration(char *dst, size_t size, unsigned long long seconds);
 void job_view(const struct Job *job, struct Job_view *view);
+void fit_columns(char *dst, size_t size, const char *src, int columns, int pad);
 void view_cpus(const struct Job_view *view, char *dst, size_t size);
 void view_fields(const struct Job_view *view, char *dst, size_t size);
 void view_status(const struct Job_view *view, char *dst, size_t size);
