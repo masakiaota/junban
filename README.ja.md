@@ -57,7 +57,25 @@ $ id=$(junban run --detach -c 8 python train.py)
 junban: id=63 log=/Users/me/Library/Caches/junban/logs/63.log
 ```
 
-ジョブはその後、順番を待って通常どおり実行されます。ジョブの標準出力と標準エラーは、待ち行列のディレクトリ（macOS では `~/Library/Caches/junban`、Ubuntu では `$XDG_RUNTIME_DIR/junban` か `~/.cache/junban`）の `logs/ID.log` に書かれます。このパスは `junban ls` にも `log=` として表示されます。標準入力は `/dev/null` です。終わったあとは、`junban ls -a --id 63` でどう終了したかを確認できます。junban のサーバーが再起動するとジョブIDは0から振り直され、同じIDの古いログは新しいジョブで上書きされます。
+ジョブはその後、順番を待って通常どおり実行されます。ジョブの標準出力と標準エラーは、待ち行列のディレクトリ（macOS では `~/Library/Caches/junban`、Ubuntu では `$XDG_RUNTIME_DIR/junban` か `~/.cache/junban`）の `logs/ID.log` に書かれます。このパスは `junban ls` にも `log=` として表示されます。標準入力は `/dev/null` です。終了を待つには、次に説明する `junban wait` を使います。junban のサーバーが再起動するとジョブIDは0から振り直され、同じIDの古いログは新しいジョブで上書きされます。
+
+### ジョブの終了を待つ
+
+`junban wait` は、指定したジョブがすべて終わるまで待ちます。終了コードは各ジョブの終了コードの最大値なので、すべて成功すれば 0 です。
+
+```console
+$ a=$(junban run --detach -c 4 python train.py --fold 0)
+$ b=$(junban run --detach -c 4 python train.py --fold 1)
+$ junban wait "$a" "$b"
+```
+
+- すでに終わったジョブは、その結果からすぐに判定します。junban は、終わったジョブのうち最後の1000個の結果を覚えています。
+- `--timeout DUR` を付けると、`DUR`（`90s`、`30m`、`2h`、`1d`）が過ぎたところで待つのをやめ、終了コード 124 を返します。ジョブは動き続けます。
+- `--tag TAG` を付けると、待ち始めた時点で実行中・待機中のそのタグのジョブと、待っている間に投入されたそのタグのジョブを待ちます。待ち始める前に終わっていたジョブは含みません。ジョブごとの結果を確実に知りたいときは、IDを指定して待ちます。
+- 既定では何も出力しません。`-v` を付けると、ジョブが終わるたびに標準出力に1行出します（例: `finished id=63 exit=0 elapsed=4m12s`）。
+- junban 自身のエラー（存在しないジョブID、待ち行列に接続できない、など）のときは 125 を返します。
+
+ジョブを待つときは `junban wait` を使い、`junban ls` を見張るループは書かないでください。一覧全体を見張ると、ほかのエージェントのジョブまで待ってしまいます。
 
 ### かかる時間を伝える
 

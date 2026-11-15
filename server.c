@@ -333,6 +333,9 @@ static enum Break
         case SNAPSHOT:
             s_snapshot(s, m.u.size);
             break;
+        case JOB_INFO:
+            s_job_info(s, m.u.jobid);
+            break;
         case WAIT_NOTICE:
             if (client_cs[index].hasjob)
                 s_wait_notice(s, client_cs[index].jobid);

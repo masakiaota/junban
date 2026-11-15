@@ -57,7 +57,25 @@ $ id=$(junban run --detach -c 8 python train.py)
 junban: id=63 log=/Users/me/Library/Caches/junban/logs/63.log
 ```
 
-The job then waits for its turn and runs as usual. Its standard output and standard error go to the file `logs/ID.log` in the queue directory (`~/Library/Caches/junban` on macOS; `$XDG_RUNTIME_DIR/junban` or `~/.cache/junban` on Ubuntu). The path is also shown as `log=` in `junban ls`. Its standard input is `/dev/null`. When it has finished, `junban ls -a --id 63` shows how it ended. Job IDs start again from 0 when the junban server restarts, and a new job then overwrites an old log with the same ID.
+The job then waits for its turn and runs as usual. Its standard output and standard error go to the file `logs/ID.log` in the queue directory (`~/Library/Caches/junban` on macOS; `$XDG_RUNTIME_DIR/junban` or `~/.cache/junban` on Ubuntu). The path is also shown as `log=` in `junban ls`. Its standard input is `/dev/null`. Wait for it with `junban wait`, described next. Job IDs start again from 0 when the junban server restarts, and a new job then overwrites an old log with the same ID.
+
+### Wait for jobs
+
+`junban wait` blocks until the given jobs have finished. Its exit status is the highest exit status of those jobs, so it is 0 when all of them succeeded:
+
+```console
+$ a=$(junban run --detach -c 4 python train.py --fold 0)
+$ b=$(junban run --detach -c 4 python train.py --fold 1)
+$ junban wait "$a" "$b"
+```
+
+- Jobs that have already finished are judged at once from their results. junban keeps the results of the last 1000 finished jobs.
+- `--timeout DUR` gives up after `DUR` (`90s`, `30m`, `2h`, `1d`) and exits with 124. The jobs keep running.
+- `--tag TAG` waits for every job with that tag that is running or queued when the wait starts, or is queued while it waits. Jobs with the tag that had already finished are not included. To know each job's result, wait by ID.
+- By default it prints nothing. With `-v`, it prints one line on standard output each time a job finishes: `finished id=63 exit=0 elapsed=4m12s`.
+- It exits with 125 for junban's own errors, such as an unknown job ID or not being able to reach the queue.
+
+Wait with `junban wait`, not with a loop around `junban ls`. A loop over the whole listing also waits for other agents' jobs.
 
 ### Say how long it will take
 

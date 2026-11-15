@@ -129,10 +129,11 @@ void s_snapshot(int socket, int all)
         if (p->state == RUNNING) send_view(socket, p);
     for (p = firstjob; p; p = p->next)
         if (p->state == QUEUED) send_view(socket, p);
-    for (p = first_finished_job; p && count < 20; p = p->next)
-        finished[count++] = p;
-    for (int i = count - 1; i >= 0 && limit; --i, --limit)
-        send_view(socket, finished[i]);
+    /* Listings show only the newest 20 of the kept results. */
+    for (p = first_finished_job; p; p = p->next)
+        finished[count++ % 20] = p;
+    for (int i = count - 1; i >= 0 && i >= count - 20 && limit; --i, --limit)
+        send_view(socket, finished[i % 20]);
     end.type = SNAPSHOT_END;
     end.u.max_slots = max_slots;
     send_msg(socket, &end);
@@ -321,10 +322,33 @@ int next_run_job()
     return -1;
 }
 
-/* junban keeps the last 20 finished jobs. */
+/* junban keeps the results of the last 1000 finished jobs, so junban wait
+ * can report a job that finished long ago. ls shows the newest 20. */
 static int get_max_finished_jobs()
 {
-    return 20;
+    return 1000;
+}
+
+/* A negative ID asks for the ID the next job will get. */
+void s_job_info(int socket, int jobid)
+{
+    struct Job *p;
+    if (jobid < 0) {
+        struct msg next = {0};
+        next.type = JOB_INFO;
+        next.u.jobid = jobids;
+        send_msg(socket, &next);
+        return;
+    }
+    p = findjob(jobid);
+    if (!p)
+        for (p = first_finished_job; p && p->jobid != jobid; p = p->next) {}
+    if (p) send_view(socket, p);
+    else {
+        struct msg unknown = {0};
+        unknown.type = NEWJOB_NOK;
+        send_msg(socket, &unknown);
+    }
 }
 
 /* Add the job to the finished queue. */

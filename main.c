@@ -18,16 +18,16 @@ int server_socket = -1;
 
 static void usage(void)
 {
-    error("usage: run [-c N | --cpus N] [--estimate DUR] [--tag TAG] [--detach] [--] command [args...]; ls [-a] [--id N]... [--dir NAME]... [--tag TAG]... | ls --summary; watch; kill ID | kill --tag TAG; shutdown; help; version");
+    error("usage: run [-c N | --cpus N] [--estimate DUR] [--tag TAG] [--detach] [--] command [args...]; ls [-a] [--id N]... [--dir NAME]... [--tag TAG]... | ls --summary; wait [-v] [--timeout DUR] [--tag TAG]... [ID...]; watch; kill ID | kill --tag TAG; shutdown; help; version");
 }
 
-static unsigned long long duration(const char *s)
+static unsigned long long duration(const char *s, const char *what)
 {
     unsigned long long value = 0, factor;
-    if (*s < '0' || *s > '9') error("estimate must be a positive integer with unit s, m, h or d");
+    if (*s < '0' || *s > '9') error("%s must be a positive integer with unit s, m, h or d", what);
     while (*s >= '0' && *s <= '9') {
         if (value > (ULLONG_MAX - (unsigned)(*s - '0')) / 10)
-            error("estimate is too large");
+            error("%s is too large", what);
         value = value * 10 + (unsigned)(*s++ - '0');
     }
     switch (*s) {
@@ -35,10 +35,10 @@ static unsigned long long duration(const char *s)
     case 'm': factor = 60; break;
     case 'h': factor = 3600; break;
     case 'd': factor = 86400; break;
-    default: error("estimate requires unit s, m, h or d"); return 0;
+    default: error("%s requires unit s, m, h or d", what); return 0;
     }
-    if (s[1] || !value) error("estimate must be a positive integer with unit s, m, h or d");
-    if (value > ULLONG_MAX / factor) error("estimate is too large");
+    if (s[1] || !value) error("%s must be a positive integer with unit s, m, h or d", what);
+    if (value > ULLONG_MAX / factor) error("%s is too large", what);
     return value * factor;
 }
 
@@ -106,6 +106,11 @@ int main(int argc, char **argv)
         puts("      --dir NAME   Only jobs whose dir= is NAME. Repeatable.");
         puts("      --tag TAG    Only jobs tagged TAG. Repeatable. Different options combine with AND.");
         puts("  junban ls --summary   Print only the queue totals: cpus BUSY/TOTAL running N queued N.");
+        puts("  junban wait [-v] [--timeout DUR] [--tag TAG]... [ID...]");
+        puts("      Block until the jobs finish; finished jobs are judged from their kept results.");
+        puts("      --tag TAG    Also wait for every running and queued job tagged TAG.");
+        puts("      --timeout DUR   Give up after DUR (90s, 30m, 2h, 1d) with exit status 124.");
+        puts("      -v           Print one line per finished job: finished id=N exit=N elapsed=DUR.");
         puts("  junban watch       Live view for a terminal. q quits.");
         puts("  junban kill ID     Stop a running job, or remove a queued one.");
         puts("  junban kill --tag TAG   Do that to every running and queued job tagged TAG.");
@@ -121,6 +126,8 @@ int main(int argc, char **argv)
         puts("  over                   The job has run longer than its estimate.");
         puts("  exit=N, signal=N, killed, client-lost   How a finished job ended.");
         puts("");
+        puts("Exit status of wait: the highest exit status of the jobs (0 if all succeeded),");
+        puts("  124 on timeout, 125 on junban errors such as an unknown ID.");
         puts("Exit status of ls: 0 if it listed a job, 1 if it listed none, 125 on junban errors.");
         puts("Exit status of run: the command's own, or 128+N if signal N killed it.");
         puts("  125: junban could not queue or run it. 126: not executable. 127: not found.");
@@ -155,7 +162,7 @@ int main(int argc, char **argv)
             }
             if (!strcmp(argv[i], "--estimate")) {
                 if (command_line.estimate || ++i == argc) usage();
-                command_line.estimate = duration(argv[i++]);
+                command_line.estimate = duration(argv[i++], "estimate");
                 continue;
             }
             if (strcmp(argv[i], "-c") && strcmp(argv[i], "--cpus")) usage();
@@ -191,6 +198,27 @@ int main(int argc, char **argv)
             (command_line.list_all || command_line.num_ids || command_line.num_dirs ||
              command_line.num_tags))
             usage();
+    } else if (!strcmp(argv[1], "wait")) {
+        const char *self = getenv("JUNBAN_JOB_ID");
+        command_line.request = c_WAIT;
+        command_line.ids = malloc(sizeof(int) * (size_t)argc);
+        command_line.tags = malloc(sizeof(char *) * (size_t)argc);
+        if (!command_line.ids || !command_line.tags) error("out of memory");
+        for (; i < argc; ++i) {
+            if ((!strcmp(argv[i], "-v") || !strcmp(argv[i], "--verbose")) && !command_line.verbose)
+                command_line.verbose = 1;
+            else if (!strcmp(argv[i], "--timeout") && i + 1 < argc && !command_line.timeout)
+                command_line.timeout = duration(argv[++i], "timeout");
+            else if (!strcmp(argv[i], "--tag") && i + 1 < argc)
+                command_line.tags[command_line.num_tags++] = checked_tag(argv[++i], "tag");
+            else
+                command_line.ids[command_line.num_ids++] = number(argv[i], 0);
+        }
+        if (!command_line.num_ids && !command_line.num_tags) usage();
+        /* A job waiting for itself would never finish. */
+        for (int n = 0; self && n < command_line.num_ids; ++n)
+            if (command_line.ids[n] == atoi(self))
+                error("job %s cannot wait for itself", self);
     } else if (!strcmp(argv[1], "watch") && argc == 2) {
         if (!isatty(STDOUT_FILENO)) error("watch requires a terminal; use junban ls");
         command_line.request = c_WATCH;
@@ -235,6 +263,7 @@ int main(int argc, char **argv)
     case c_WATCH: c_watch(); break;
     case c_KILL_SERVER: c_shutdown_server(); break;
     case c_KILL_JOB: c_kill_job(); break;
+    case c_WAIT: status = c_wait(); break;
     case c_KILL_TAG:
         /* Like pkill: 1 when no job carried the tag. */
         if (!c_kill_tag()) {
@@ -249,6 +278,7 @@ int main(int argc, char **argv)
     free(command_line.log_prefix);
     free(command_line.ids);
     free(command_line.dirs);
-    if (command_line.request == c_LIST) free(command_line.tags);
+    if (command_line.request == c_LIST || command_line.request == c_WAIT)
+        free(command_line.tags);
     return status;
 }

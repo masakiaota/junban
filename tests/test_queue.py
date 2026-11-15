@@ -908,6 +908,95 @@ class VisibilityOnlyTests(unittest.TestCase):
             self.assertEqual((q.path / "logs" / "5.log").read_text().strip(),
                              str((q.path / "sub").resolve()))
 
+    def test_wait(self):
+        with Queue(2) as q:
+            def detach(*args):
+                code, out, err = q.call("run", "--detach", *args)
+                self.assertEqual(code, 0, err)
+                return out.decode().strip()
+            def hold(name, *opts):
+                return detach("-c", "1", *opts, PY, WORKER, "hold", name + ".pids", name + ".release")
+            done = detach("-c", "1", "sh", "-c", "exit 3")
+            eventually(lambda: "exit=3" in q.call("ls", "-a", "--id", done)[1].decode())
+            # Finished jobs are judged at once, with or without a timeout.
+            self.assertEqual(q.call("wait", done), (3, b"", b""))
+            self.assertEqual(q.call("wait", "--timeout", "1s", done), (3, b"", b""))
+            code, out, err = q.call("wait", "-v", done)
+            self.assertEqual((code, err), (3, b""))
+            self.assertRegex(out.decode(), r"^finished id=0 exit=3 elapsed=\d+s\n$")
+            # A running job and a queued job behind it.
+            running = hold("running")
+            q.pids("running")
+            queued = detach("sh", "-c", "exit 5")
+            self.assertEqual(q.rows(), [(1, "running"), (2, "queued")])
+            for ids in ([running], [queued], [running, queued, done]):
+                started = time.monotonic()
+                self.assertEqual(q.call("wait", "--timeout", "1s", *ids),
+                                 (124, b"", b"junban: timed out with %d of %d jobs unfinished\n"
+                                  % (len(set(ids) - {done}), len(ids))))
+                self.assertGreaterEqual(time.monotonic() - started, 0.9)
+            waiter = q.popen("wait", "-v", running, queued, done)
+            timed = q.popen("wait", "--timeout", "1h", queued)
+            time.sleep(0.5)
+            self.assertIsNone(waiter.poll())
+            self.assertIsNone(timed.poll())
+            q.release("running")
+            out, err = waiter.communicate(timeout=5)
+            self.assertEqual((waiter.returncode, err), (5, b""))
+            lines = out.decode().splitlines()
+            self.assertEqual(sorted(line.split()[1] for line in lines), ["id=0", "id=1", "id=2"])
+            self.assertRegex(lines[-1], r"^finished id=2 exit=5 elapsed=\d+s$")
+            self.assertEqual(timed.communicate(timeout=5), (b"", b""))
+            self.assertEqual(timed.returncode, 5)
+            self.assertEqual(q.call("wait", running), (0, b"", b""))
+            # Tags: all running and queued jobs with the tag, also ones queued later.
+            a = hold("a", "--tag", "t")
+            q.pids("a")
+            b = hold("b", "--tag", "t")
+            q.pids("b")
+            other = hold("other", "--tag", "u")
+            tagged = q.popen("wait", "-v", "--tag", "t")
+            time.sleep(0.3)
+            later = detach("-c", "1", "--tag", "t", "sh", "-c", "exit 7")
+            q.release("a")
+            q.release("b")
+            out, err = tagged.communicate(timeout=5)
+            self.assertEqual((tagged.returncode, err), (7, b""), out)
+            self.assertEqual(sorted(line.split()[1] for line in out.decode().splitlines()),
+                             sorted("id=" + i for i in (a, b, later)))
+            self.assertEqual(q.call("wait", "--tag", "t"), (0, b"", b""))
+            self.assertEqual(q.call("wait", "--timeout", "1s", "--tag", "u", "--tag", "t")[0], 124)
+            q.pids("other")
+            q.release("other")
+            self.assertEqual(q.call("wait", "--tag", "u", done), (3, b"", b""))
+            # Killed jobs report their status; killed queued jobs 125.
+            blocker = hold("blocker")
+            q.pids("blocker")
+            removed = detach("true")
+            self.assertEqual(q.call("kill", removed), (0, b"", b""))
+            self.assertEqual(q.call("kill", blocker), (0, b"", b""))
+            code, out, err = q.call("wait", "-v", blocker, removed)
+            self.assertEqual((code, err), (143, b""))
+            self.assertIn(b"finished id=%s killed " % removed.encode(), out)
+            # Results stay available after they drop out of ls -a.
+            for _ in range(25):
+                detach("-c", "1", "true")
+            eventually(lambda: q.call("ls")[0] == 1)
+            self.assertEqual(q.call("ls", "-a", "--id", done)[0], 1)
+            self.assertEqual(q.call("wait", done), (3, b"", b""))
+            # junban errors.
+            self.own_failure(q.call("wait", "9999"), "unknown job ID 9999")
+            self.own_failure(q.call("wait", done, "9999"), "unknown")
+            for args in ([], ["-v"], ["--timeout", "1s"], ["x"], ["-1"], ["--timeout"],
+                         ["--timeout", "0s", "0"], ["--timeout", "1", "0"], ["--tag"],
+                         ["--tag", "a b"], ["-v", "-v", "0"], ["--timeout", "1s", "--timeout", "1s", "0"]):
+                self.own_failure(q.call("wait", *args))
+            env = dict(q.env, JUNBAN_SOCKET="missing/s")
+            self.own_failure(q.call("wait", "0", env=env))
+            code, out, err = q.call("run", "-c", "1", "sh", "-c", BIN + ' wait "$JUNBAN_JOB_ID"')
+            self.assertEqual(code, 125)
+            self.assertIn(b"cannot wait for itself", err)
+
     def test_estimate_parsing_and_units(self):
         with Queue() as q:
             for value in ("", "1", "s", "0s", "-1m", "+1s", "1.5h", "1ms", "1w",

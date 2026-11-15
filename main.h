@@ -53,12 +53,13 @@ enum msg_types
     SNAPSHOT_ROW,
     SNAPSHOT_END,
     WAIT_NOTICE,
-    NOTICE_END
+    NOTICE_END,
+    JOB_INFO
 };
 
 enum Request
 {
-    c_QUEUE, c_KILL_SERVER, c_LIST, c_KILL_JOB, c_WATCH, c_KILL_TAG
+    c_QUEUE, c_KILL_SERVER, c_LIST, c_KILL_JOB, c_WATCH, c_KILL_TAG, c_WAIT
 };
 
 struct Command_line {
@@ -84,6 +85,8 @@ struct Command_line {
     int num_tags;
     char *tag; /* The tag of a new job, or NULL. */
     int detach;
+    int verbose;
+    unsigned long long timeout; /* Seconds; zero waits forever. */
     char *log_prefix; /* Log directory of a detached job, ending in '/'. */
 };
 
@@ -198,6 +201,7 @@ int job_selected(const struct Job_view *view);
 int print_snapshot(const struct Snapshot *snapshot);
 int fetch_snapshot(struct Snapshot *snapshot);
 void s_snapshot(int socket, int all);
+void s_job_info(int socket, int jobid);
 void s_wait_notice(int socket, int jobid);
 void c_watch(void);
 int s_has_jobs(void);
@@ -220,6 +224,7 @@ void c_kill_job();
 int c_kill_tag(void);
 char *c_log_prefix(void);
 void c_detach(void);
+int c_wait(void);
 void c_get_max_slots();
 
 /* jobs.c */

@@ -20,6 +20,10 @@ Unreleased (behaviour changes for scripts):
    across versions) after upgrading. (#6)
  - junban run --detach queues the job, prints only its ID and returns. The
    job's output goes to <queue dir>/logs/ID.log, shown as log= in ls. (#2)
+ - junban wait [-v] [--timeout DUR] [--tag TAG]... [ID...] blocks until jobs
+   finish. It exits with their highest exit status, 124 on timeout and 125
+   on junban errors. The server now keeps the results of the last 1000
+   finished jobs for it; ls -a still shows the newest 20. (#1)
 
 ## Features to be implemented
 

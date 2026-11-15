@@ -18,6 +18,7 @@
 #include <poll.h>
 #include <limits.h>
 #include <fcntl.h>
+#include <time.h>
 #include <sys/stat.h>
 #include <sys/resource.h>
 #include "main.h"
@@ -341,6 +342,120 @@ void c_detach(void)
         for (int i = 3; (rlim_t)i < lim.rlim_cur && i < 4096; ++i)
             if (i != server_socket) close(i);
     free(log);
+}
+
+/* 1 with the job's view, 0 for an ID the queue does not know. */
+static int job_info(int jobid, struct Job_view *view)
+{
+    struct msg m = {0};
+    m.type = JOB_INFO;
+    m.u.jobid = jobid;
+    send_msg(server_socket, &m);
+    if (recv_msg(server_socket, &m) != sizeof(m))
+        error("queue disconnected while waiting");
+    if (m.type == NEWJOB_NOK) return 0;
+    if (m.type != SNAPSHOT_ROW ||
+        recv_bytes(server_socket, (char *)view, sizeof(*view)) != (int)sizeof(*view))
+        error("queue disconnected while waiting");
+    return 1;
+}
+
+struct Target { int jobid, done; };
+
+static int next_jobid(void)
+{
+    struct msg m = {0};
+    m.type = JOB_INFO;
+    m.u.jobid = -1;
+    send_msg(server_socket, &m);
+    if (recv_msg(server_socket, &m) != sizeof(m) || m.type != JOB_INFO)
+        error("queue disconnected while waiting");
+    return m.u.jobid;
+}
+
+static int tagged(const struct Job_view *view)
+{
+    for (int t = 0; t < command_line.num_tags; ++t)
+        if (!strcmp(view->tag, command_line.tags[t])) return 1;
+    return 0;
+}
+
+static void add_target(struct Target **targets, int *count, int *size, int jobid)
+{
+    for (int i = 0; i < *count; ++i)
+        if ((*targets)[i].jobid == jobid) return;
+    if (*count == *size) {
+        *size = *size * 2 + 8;
+        struct Target *more = realloc(*targets, sizeof(**targets) * (size_t)*size);
+        if (!more) error("out of memory");
+        *targets = more;
+    }
+    (*targets)[*count].jobid = jobid;
+    (*targets)[(*count)++].done = 0;
+}
+
+/* Wait until the given jobs have finished, and the tagged jobs that were
+ * running or queued when the wait began or were queued since. Returns the highest exit status among them, or 124 when
+ * the timeout passes first. Unknown IDs are junban errors. */
+int c_wait(void)
+{
+    struct Target *targets = NULL;
+    int count = 0, size = 0, status = 0, scanned = 0;
+    double deadline = command_line.timeout ? monotime() + (double)command_line.timeout : 0;
+    for (int i = 0; i < command_line.num_ids; ++i)
+        add_target(&targets, &count, &size, command_line.ids[i]);
+    if (command_line.num_tags) {
+        struct Snapshot snapshot = {0};
+        scanned = next_jobid();
+        if (!fetch_snapshot(&snapshot)) error("queue disconnected while waiting");
+        for (size_t i = 0; i < snapshot.count; ++i) {
+            const struct Job_view *v = &snapshot.jobs[i];
+            if ((v->state == RUNNING || v->state == QUEUED) && tagged(v))
+                add_target(&targets, &count, &size, v->jobid);
+        }
+        free(snapshot.jobs);
+    }
+    for (;;) {
+        int finished = 0;
+        if (command_line.num_tags) {
+            /* Check every job queued since, even one that already ended. */
+            struct Job_view view;
+            for (int next = next_jobid(); scanned < next; ++scanned)
+                if (job_info(scanned, &view) && tagged(&view))
+                    add_target(&targets, &count, &size, scanned);
+        }
+        for (int i = 0; i < count; ++i) {
+            struct Job_view view;
+            if (targets[i].done) { ++finished; continue; }
+            if (!job_info(targets[i].jobid, &view))
+                error("unknown job ID %d", targets[i].jobid);
+            if (view.state == RUNNING || view.state == QUEUED) continue;
+            targets[i].done = 1;
+            ++finished;
+            int code = view.status < 0 || view.status > 255 ? 125 : view.status;
+            if (code > status) status = code;
+            if (command_line.verbose) {
+                char result[48], elapsed[48];
+                view_status(&view, result, sizeof(result));
+                format_duration(elapsed, sizeof(elapsed), (unsigned long long)view.elapsed);
+                printf("finished id=%d %s elapsed=%s\n", view.jobid, result, elapsed);
+                fflush(stdout);
+            }
+        }
+        if (finished == count) break;
+        double now = monotime(), delay = 0.2;
+        if (deadline && now >= deadline) {
+            fprintf(stderr, "junban: timed out with %d of %d jobs unfinished\n",
+                    count - finished, count);
+            status = 124;
+            break;
+        }
+        if (deadline && deadline - now < delay) delay = deadline - now;
+        struct timespec pause = {0, (long)(delay * 1e9)};
+        nanosleep(&pause, NULL);
+    }
+    free(targets);
+    return status;
 }
 
 void c_get_max_slots()
