@@ -6,7 +6,7 @@ agent-readable listings and wait notifications, a terminal watch view, and macOS
 idle-sleep prevention. Removed the old command-line interface and obsolete
 packaging, output capture, mail, dependencies, and queue-reordering features.
 
-Unreleased (behaviour changes for scripts):
+v0.1.1 (changes junban ls output and exit status for scripts):
  - junban ls prints only job lines on standard output, each starting with
    running, queued or done. An empty queue prints nothing. The summary line
    "cpus B/T running N queued N" moved to junban ls --summary. (#3)
