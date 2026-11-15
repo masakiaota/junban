@@ -171,8 +171,14 @@ Put something like this in `AGENTS.md` or `CLAUDE.md`:
 - Give the number of CPUs with -c, counting threads and child processes.
 - Run benchmarks that measure run time without -c.
 - When you can guess how long a job will take, say so with --estimate.
-- When you have to wait, check junban ls. Do not stop other agents' jobs.
+- junban run in the foreground does not return until the job ends. To run jobs
+  in parallel, start each with id=$(junban run --detach ...) and pass the IDs
+  to junban wait. Its exit status is the highest exit status of the jobs.
+- Never wait with a loop that greps the output of junban ls.
+- Do not stop other agents' jobs.
 ```
+
+If each agent session sets its own `JUNBAN_TAG` (for example `export JUNBAN_TAG=agent-1`), you can add a line such as `To stop all of your jobs, use junban kill --tag "$JUNBAN_TAG".`
 
 ## Limitations
 
