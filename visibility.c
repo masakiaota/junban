@@ -132,6 +132,26 @@ void print_summary(const struct Snapshot *snapshot)
            snapshot->running, snapshot->queued);
 }
 
+int job_selected(const struct Job_view *view)
+{
+    int i, found;
+    if (command_line.num_ids) {
+        for (i = found = 0; i < command_line.num_ids && !found; ++i)
+            found = view->jobid == command_line.ids[i];
+        if (!found) return 0;
+    }
+    if (command_line.num_dirs) {
+        /* Match the dir= field as printed, so encoded names work as shown. */
+        char dir[sizeof(view->label)];
+        for (i = found = 0; i < command_line.num_dirs && !found; ++i) {
+            safe_text(dir, sizeof(dir), command_line.dirs[i], 1);
+            found = !strcmp(view->label, dir) || !strcmp(view->label, command_line.dirs[i]);
+        }
+        if (!found) return 0;
+    }
+    return 1;
+}
+
 /* stdout carries job lines only, so an empty queue prints nothing.
  * Returns the number of lines printed. */
 int print_snapshot(const struct Snapshot *snapshot)
@@ -140,6 +160,7 @@ int print_snapshot(const struct Snapshot *snapshot)
     for (size_t i = 0; i < snapshot->count; ++i) {
         const struct Job_view *v = &snapshot->jobs[i];
         if (!command_line.list_all && v->state != RUNNING && v->state != QUEUED) continue;
+        if (!job_selected(v)) continue;
         char timing[128], cpus[32], status[48];
         view_cpus(v, cpus, sizeof(cpus));
         view_fields(v, timing, sizeof(timing));

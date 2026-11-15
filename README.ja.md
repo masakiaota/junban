@@ -77,6 +77,14 @@ $ junban ls --summary
 cpus 1/4 running 1 queued 1
 ```
 
+一部のジョブだけを表示したいときは、ジョブIDを `--id N` で、ディレクトリ（`dir=` の名前）を `--dir NAME` で指定します。どちらも繰り返し指定でき、互いに、また `-a` とも組み合わせられます。このときの終了コードは、指定したジョブが表示されたかどうかを表します。
+
+```console
+$ junban ls --id 63 --id 64
+running id=63 dir=demo cpus=8 elapsed=5m cmd=python train.py
+$ junban ls -a --dir demo
+```
+
 人間が見るときは `junban watch` が便利です。画面が2秒ごとに更新されます。`q` で終了します。
 
 ```text

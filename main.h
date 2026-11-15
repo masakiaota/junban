@@ -74,6 +74,11 @@ struct Command_line {
     unsigned long long estimate;
     int list_all;
     int list_summary;
+    /* Job selection for ls: a job must match one value of each given option. */
+    int *ids;
+    int num_ids;
+    char **dirs;
+    int num_dirs;
 };
 
 enum Process_type {
@@ -179,6 +184,7 @@ void view_cpus(const struct Job_view *view, char *dst, size_t size);
 void view_fields(const struct Job_view *view, char *dst, size_t size);
 void view_status(const struct Job_view *view, char *dst, size_t size);
 void print_summary(const struct Snapshot *snapshot);
+int job_selected(const struct Job_view *view);
 int print_snapshot(const struct Snapshot *snapshot);
 int fetch_snapshot(struct Snapshot *snapshot);
 void s_snapshot(int socket, int all);

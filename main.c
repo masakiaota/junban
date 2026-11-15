@@ -18,7 +18,7 @@ int server_socket = -1;
 
 static void usage(void)
 {
-    error("usage: run [-c N | --cpus N] [--estimate DUR] [--] command [args...]; ls [-a] | ls --summary; watch; kill ID; shutdown; help; version");
+    error("usage: run [-c N | --cpus N] [--estimate DUR] [--] command [args...]; ls [-a] [--id N]... [--dir NAME]... | ls --summary; watch; kill ID; shutdown; help; version");
 }
 
 static unsigned long long duration(const char *s)
@@ -86,7 +86,10 @@ int main(int argc, char **argv)
         puts("      Wait for a turn, then run COMMAND as if it were run directly.");
         puts("      -c N, --cpus N   CPUs the job uses. Without it, the job takes all CPUs and runs alone.");
         puts("      --estimate DUR   Expected duration: 90s, 30m, 2h, 1d. Shown to others. Never a timeout.");
-        puts("  junban ls [-a]     List running and queued jobs, one per line. -a adds the last 20 finished jobs.");
+        puts("  junban ls [-a] [--id N]... [--dir NAME]...");
+        puts("      List running and queued jobs, one per line. -a adds the last 20 finished jobs.");
+        puts("      --id N       Only job N. Repeat to list several IDs.");
+        puts("      --dir NAME   Only jobs whose dir= is NAME. Repeatable. Options combine with AND.");
         puts("  junban ls --summary   Print only the queue totals: cpus BUSY/TOTAL running N queued N.");
         puts("  junban watch       Live view for a terminal. q quits.");
         puts("  junban kill ID     Stop a running job, or remove a queued one.");
@@ -133,15 +136,24 @@ int main(int argc, char **argv)
         command_line.label = caller_label();
     } else if (!strcmp(argv[1], "ls")) {
         command_line.request = c_LIST;
+        command_line.ids = malloc(sizeof(int) * (size_t)argc);
+        command_line.dirs = malloc(sizeof(char *) * (size_t)argc);
+        if (!command_line.ids || !command_line.dirs) error("out of memory");
         for (; i < argc; ++i) {
             if (!strcmp(argv[i], "-a") && !command_line.list_all)
                 command_line.list_all = 1;
             else if (!strcmp(argv[i], "--summary") && !command_line.list_summary)
                 command_line.list_summary = 1;
+            else if (!strcmp(argv[i], "--id") && i + 1 < argc)
+                command_line.ids[command_line.num_ids++] = number(argv[++i], 0);
+            else if (!strcmp(argv[i], "--dir") && i + 1 < argc && argv[i + 1][0])
+                command_line.dirs[command_line.num_dirs++] = argv[++i];
             else usage();
         }
         /* The summary describes the whole queue; it takes no job selection. */
-        if (command_line.list_summary && command_line.list_all) usage();
+        if (command_line.list_summary &&
+            (command_line.list_all || command_line.num_ids || command_line.num_dirs))
+            usage();
     } else if (!strcmp(argv[1], "watch") && argc == 2) {
         if (!isatty(STDOUT_FILENO)) error("watch requires a terminal; use junban ls");
         command_line.request = c_WATCH;
@@ -181,5 +193,7 @@ int main(int argc, char **argv)
     }
     close(server_socket);
     free(command_line.label);
+    free(command_line.ids);
+    free(command_line.dirs);
     return status;
 }

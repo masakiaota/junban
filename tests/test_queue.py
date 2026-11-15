@@ -737,6 +737,49 @@ class VisibilityOnlyTests(unittest.TestCase):
             for args in (["ls"], ["ls", "-a"], ["ls", "--summary"]):
                 self.own_failure(q.call(*args, env=env))
 
+    def test_ls_filters(self):
+        with Queue(4) as q:
+            q.call("ls")
+            for name in ("alpha", "beta", "sp ace"):
+                (q.path / name).mkdir()
+            env = dict(q.env, JUNBAN_SOCKET="../s")
+            self.assertEqual(q.call("run", "true", cwd=q.path / "alpha", env=env), (0, b"", b""))
+            a = q.popen("run", "-c", "1", PY, WORKER, "hold", q.path / "a.pids",
+                        q.path / "a.release", cwd=q.path / "alpha", env=env)
+            q.pids("a")
+            b = q.popen("run", "-c", "1", PY, WORKER, "hold", q.path / "b.pids",
+                        q.path / "b.release", cwd=q.path / "beta", env=env)
+            q.pids("b")
+            c = q.popen("run", "-c", "1", PY, WORKER, "hold", q.path / "c.pids",
+                        q.path / "c.release", cwd=q.path / "sp ace", env=env)
+            q.pids("c")
+            def listed(*args):
+                code, out, err = q.call("ls", *args)
+                self.assertEqual((code, err), (0 if out else 1, b""), args)
+                return [int(line.split()[1][3:]) for line in out.decode().splitlines()]
+            self.assertEqual(listed(), [1, 2, 3])
+            self.assertEqual(listed("--id", "2"), [2])
+            self.assertEqual(listed("--id", "3", "--id", "1"), [1, 3])
+            self.assertEqual(listed("--id", "0"), [])
+            self.assertEqual(listed("--id", "0", "-a"), [0])
+            self.assertEqual(listed("--id", "99"), [])
+            self.assertEqual(listed("--dir", "alpha"), [1])
+            self.assertEqual(listed("--dir", "alpha", "-a"), [1, 0])
+            self.assertEqual(listed("--dir", "alpha", "--dir", "beta"), [1, 2])
+            self.assertEqual(listed("--dir", "sp%20ace"), [3])
+            self.assertEqual(listed("--dir", "sp ace"), [3])
+            self.assertEqual(listed("--dir", "alpha", "--id", "2"), [])
+            self.assertEqual(listed("--dir", "beta", "--id", "2"), [2])
+            self.assertEqual(listed("-a", "--dir", "alpha", "--id", "0"), [0])
+            self.assertEqual(q.call("ls", "--id", "2")[0], 0)
+            self.assertEqual(q.call("ls", "--id", "99")[0], 1)
+            for args in (["--id"], ["--id", "x"], ["--id", "-1"], ["--dir"], ["--dir", ""],
+                         ["--summary", "--id", "1"], ["--summary", "--dir", "alpha"]):
+                self.own_failure(q.call("ls", *args))
+            for name, p in (("a", a), ("b", b), ("c", c)):
+                q.release(name)
+                self.assertEqual(p.wait(timeout=3), 0)
+
     def test_estimate_parsing_and_units(self):
         with Queue() as q:
             for value in ("", "1", "s", "0s", "-1m", "+1s", "1.5h", "1ms", "1w",

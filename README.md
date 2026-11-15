@@ -77,6 +77,14 @@ $ junban ls --summary
 cpus 1/4 running 1 queued 1
 ```
 
+To list only some jobs, use `--id N` for a job ID and `--dir NAME` for the directory shown as `dir=`. Both can be repeated, and they can be combined with each other and with `-a`. The exit status then tells whether any of those jobs is listed:
+
+```console
+$ junban ls --id 63 --id 64
+running id=63 dir=demo cpus=8 elapsed=5m cmd=python train.py
+$ junban ls -a --dir demo
+```
+
 For people, `junban watch` is easier to read. The screen refreshes every two seconds. Press `q` to quit.
 
 ```text
