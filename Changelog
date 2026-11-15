@@ -19,7 +19,7 @@ v0.1.1 (changes junban ls output and exit status for scripts):
    older server must be stopped with junban shutdown (which still works
    across versions) after upgrading. (#6)
  - junban run --detach queues the job, prints only its ID and returns. The
-   job's output goes to <queue dir>/logs/ID.log, shown as log= in ls. (#2)
+   job's output goes to <queue socket>.logs/ID.log, shown as log= in ls. (#2)
  - junban wait [-v] [--timeout DUR] [--tag TAG]... [ID...] blocks until jobs
    finish. It exits with their highest exit status, 124 on timeout and 125
    on junban errors. The server now keeps the results of the last 1000

@@ -311,26 +311,32 @@ int c_kill_tag(void)
     return killed;
 }
 
-/* Detached logs live next to the queue socket: <socket dir>/logs/ID.log.
+/* Detached logs live next to the queue socket, like its .lock file:
+ * <socket>.logs/ID.log, so queues sharing a directory keep separate logs.
  * The socket may be in a shared directory, so the log directory must be
  * this user's own and private, and logs are opened without following
  * symlinks. */
 char *c_log_prefix(void)
 {
     char *path, *slash, *dir, *prefix;
+    const char *name;
     struct stat st;
     create_socket_path(&path);
     slash = strrchr(path, '/');
     if (slash) {
-        slash[slash == path] = '\0';
-        dir = realpath(path, NULL);
-    } else dir = realpath(".", NULL);
-    free(path);
+        name = slash + 1;
+        *slash = '\0';
+        dir = realpath(slash == path ? "/" : path, NULL);
+    } else {
+        name = path;
+        dir = realpath(".", NULL);
+    }
     if (!dir) error("cannot find queue directory: %s", strerror(errno));
-    prefix = malloc(strlen(dir) + sizeof("/logs/"));
+    prefix = malloc(strlen(dir) + strlen(name) + sizeof("//.logs/"));
     if (!prefix) error("out of memory");
-    sprintf(prefix, "%s/logs", dir);
+    sprintf(prefix, "%s/%s.logs", strcmp(dir, "/") ? dir : "", name);
     free(dir);
+    free(path);
     if (mkdir(prefix, 0700) < 0 && errno != EEXIST)
         error("cannot create log directory %s: %s", prefix, strerror(errno));
     if (lstat(prefix, &st) < 0 || !S_ISDIR(st.st_mode) || st.st_uid != getuid())
@@ -363,9 +369,16 @@ void c_detach(void)
     nullfd = open("/dev/null", O_RDONLY);
     if (nullfd < 0) error("cannot open /dev/null: %s", strerror(errno));
     /* dup2 onto 0-2 below must not overwrite one of these. */
-    if (fd <= STDERR_FILENO) fd = fcntl(fd, F_DUPFD, STDERR_FILENO + 1);
-    if (nullfd <= STDERR_FILENO) nullfd = fcntl(nullfd, F_DUPFD, STDERR_FILENO + 1);
-    if (fd < 0 || nullfd < 0) error("cannot open job log: %s", strerror(errno));
+    if (fd <= STDERR_FILENO || nullfd <= STDERR_FILENO) {
+        /* Close the originals too: a closed stdout or stderr reopened as
+         * the log would get the ID and diagnostics meant for the caller. */
+        int low_fd = fd, low_null = nullfd;
+        if (fd <= STDERR_FILENO) fd = fcntl(fd, F_DUPFD, STDERR_FILENO + 1);
+        if (nullfd <= STDERR_FILENO) nullfd = fcntl(nullfd, F_DUPFD, STDERR_FILENO + 1);
+        if (fd < 0 || nullfd < 0) error("cannot open job log: %s", strerror(errno));
+        if (low_fd <= STDERR_FILENO) close(low_fd);
+        if (low_null <= STDERR_FILENO) close(low_null);
+    }
     fflush(NULL);
     pid = fork();
     if (pid < 0) error("cannot detach: %s", strerror(errno));

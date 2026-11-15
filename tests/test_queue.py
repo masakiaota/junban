@@ -877,10 +877,10 @@ class VisibilityOnlyTests(unittest.TestCase):
             out, err = p.communicate(timeout=3)
             self.assertLess(time.monotonic() - started, 2)
             self.assertEqual((p.returncode, out), (0, b"1\n"))
-            log = (q.path / "logs" / "1.log").resolve()
+            log = (q.path / "s.logs" / "1.log").resolve()
             self.assertEqual(err.decode(), "junban: id=1 log=%s\n" % log)
             self.assertEqual(log.stat().st_mode & 0o777, 0o600)
-            self.assertEqual((q.path / "logs").stat().st_mode & 0o777, 0o700)
+            self.assertEqual((q.path / "s.logs").stat().st_mode & 0o777, 0o700)
             line = eventually(lambda: q.call("ls", "-a", "--id", "1")[1].decode())
             self.assertIn(" tag=d ", line)
             self.assertIn(" log=%s cmd=" % log, line)
@@ -897,7 +897,7 @@ class VisibilityOnlyTests(unittest.TestCase):
             self.assertEqual(q.rows(), [(2, "running")])
             q.release("queued")
             eventually(lambda: "exit=0" in q.call("ls", "-a", "--id", "2")[1].decode())
-            self.assertEqual((q.path / "logs" / "2.log").read_bytes(), b"")
+            self.assertEqual((q.path / "s.logs" / "2.log").read_bytes(), b"")
             # Killing a queued detached job removes it.
             blocker = q.start("blocker2", 1)
             q.pids("blocker2")
@@ -915,7 +915,7 @@ class VisibilityOnlyTests(unittest.TestCase):
             code, out, err = q.call("run", "--detach", "-c", "1", "pwd", cwd=q.path / "sub", env=env)
             self.assertEqual((code, out), (0, b"5\n"))
             eventually(lambda: "exit=0" in q.call("ls", "-a", "--id", "5")[1].decode())
-            self.assertEqual((q.path / "logs" / "5.log").read_text().strip(),
+            self.assertEqual((q.path / "s.logs" / "5.log").read_text().strip(),
                              str((q.path / "sub").resolve()))
 
     def test_wait(self):
@@ -1064,20 +1064,20 @@ class VisibilityOnlyTests(unittest.TestCase):
         with Queue(2) as q:
             # A planted symlink in the log directory is not followed.
             q.call("ls")
-            (q.path / "logs").mkdir(mode=0o755)
+            (q.path / "s.logs").mkdir(mode=0o755)
             victim = q.path / "victim"
             victim.write_text("keep")
-            (q.path / "logs" / "0.log").symlink_to(victim)
+            (q.path / "s.logs" / "0.log").symlink_to(victim)
             code, out, err = q.call("run", "--detach", "-c", "1", "true")
             self.assertEqual(code, 125, err)
             self.assertIn(b"cannot open job log", err)
             self.assertEqual(victim.read_text(), "keep")
-            self.assertEqual((q.path / "logs").stat().st_mode & 0o777, 0o700)
-            (q.path / "logs" / "0.log").unlink()
-            (q.path / "logs").rmdir()
-            (q.path / "logs").symlink_to(q.path)
+            self.assertEqual((q.path / "s.logs").stat().st_mode & 0o777, 0o700)
+            (q.path / "s.logs" / "0.log").unlink()
+            (q.path / "s.logs").rmdir()
+            (q.path / "s.logs").symlink_to(q.path)
             self.own_failure(q.call("run", "--detach", "-c", "1", "true"), "owned by this user")
-            (q.path / "logs").unlink()
+            (q.path / "s.logs").unlink()
             # With stdin closed the queue connection survives detaching.
             code, out, err = q.call("run", "--detach", "-c", "1", "true",
                                     stdin=None, preexec_fn=lambda: os.close(0))
@@ -1093,6 +1093,29 @@ class VisibilityOnlyTests(unittest.TestCase):
             q.pids("other")
             self.assertEqual(other.wait(timeout=5), 143)
             self.assertEqual(killer.wait(timeout=5), 143)
+
+    def test_detach_logs_per_socket_and_closed_streams(self):
+        with Queue(2) as q:
+            # Two queues whose sockets share a directory keep separate logs.
+            for name in ("a", "b"):
+                env = dict(q.env, JUNBAN_SOCKET=name)
+                code, out, err = q.call("run", "--detach", "-c", "1", "echo", name, env=env)
+                self.assertEqual((code, out), (0, b"0\n"), err)
+            for name in ("a", "b"):
+                log = q.path / (name + ".logs") / "0.log"
+                eventually(lambda log=log: log.exists() and log.read_text() == name + "\n")
+            for name in ("a", "b"):
+                self.assertEqual(q.call("shutdown", env=dict(q.env, JUNBAN_SOCKET=name))[0], 0)
+            # A closed stdout or stderr of the caller never becomes the job log.
+            for fd, job in ((2, 0), (1, 1)):
+                code, out, err = q.call("run", "--detach", "-c", "1", "echo", "job",
+                                        preexec_fn=lambda fd=fd: os.close(fd),
+                                        **({"stdout": None} if fd == 1 else {"stderr": None}))
+                self.assertEqual(code, 0 if fd == 2 else 125, (fd, out, err))
+                if fd == 2:
+                    self.assertEqual(out, b"0\n")
+                log = q.path / "s.logs" / ("%d.log" % job)
+                eventually(lambda log=log: log.exists() and log.read_text() == "job\n")
 
     def test_wait_timeout_covers_handshake(self):
         with Queue() as q:

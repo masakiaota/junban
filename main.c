@@ -100,7 +100,7 @@ int main(int argc, char **argv)
         puts("      --tag TAG        Label the job as yours. Default: $JUNBAN_TAG.");
         puts("                       1-63 characters of A-Z a-z 0-9 . _ : @ + -");
         puts("      --detach         Queue the job, print only its ID on stdout, and return at once.");
-        puts("                       Its stdout and stderr go to <queue dir>/logs/ID.log, shown as log= in ls.");
+        puts("                       Its stdout and stderr go to <queue socket>.logs/ID.log, shown as log= in ls.");
         puts("  junban wait [-v] [--timeout DUR] [--tag TAG]... [ID...]");
         puts("      Block until the jobs finish. Already finished jobs are judged from kept results.");
         puts("      --tag TAG        Also wait for the tagged jobs running or queued when the wait");

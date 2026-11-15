@@ -54,10 +54,10 @@ junban: id=1 started after 1s
 
 ```console
 $ id=$(junban run --detach -c 8 python train.py)
-junban: id=63 log=/Users/me/Library/Caches/junban/logs/63.log
+junban: id=63 log=/Users/me/Library/Caches/junban/queue.sock.logs/63.log
 ```
 
-ジョブはその後、順番を待って通常どおり実行されます。ジョブの標準出力と標準エラーは、待ち行列のディレクトリ（macOS では `~/Library/Caches/junban`、Ubuntu では `$XDG_RUNTIME_DIR/junban` か `~/.cache/junban`）の `logs/ID.log` に書かれます。このパスは `junban ls` にも `log=` として表示されます。標準入力は `/dev/null` です。終了を待つには、次に説明する `junban wait` を使います。junban のサーバーが再起動するとジョブIDは0から振り直され、同じIDの古いログは新しいジョブで上書きされます。
+ジョブはその後、順番を待って通常どおり実行されます。ジョブの標準出力と標準エラーは、待ち行列のディレクトリ（macOS では `~/Library/Caches/junban`、Ubuntu では `$XDG_RUNTIME_DIR/junban` か `~/.cache/junban`）の `queue.sock.logs/ID.log` に書かれます。このパスは `junban ls` にも `log=` として表示されます。標準入力は `/dev/null` です。終了を待つには、次に説明する `junban wait` を使います。junban のサーバーが再起動するとジョブIDは0から振り直され、同じIDの古いログは新しいジョブで上書きされます。
 
 ### ジョブの終了を待つ
 
