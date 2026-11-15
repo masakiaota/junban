@@ -58,6 +58,20 @@ $ junban run -c 8 --estimate 2h python train.py
 
 The estimate is shown to jobs that are waiting. A job is never stopped for running past its estimate.
 
+### Tag your jobs
+
+`--tag` puts a tag on a job, so you can treat your jobs as a group. If the environment variable `JUNBAN_TAG` is set, jobs get that tag without `--tag`. Set it once per agent session and its jobs are grouped automatically. A tag is 1 to 63 characters from `A-Z a-z 0-9 . _ : @ + -`.
+
+```console
+$ export JUNBAN_TAG=agent-1
+$ junban run -c 4 python train.py
+$ junban ls --tag agent-1
+running id=5 dir=demo tag=agent-1 cpus=4 elapsed=10s cmd=python train.py
+$ junban kill --tag agent-1
+```
+
+`junban kill --tag TAG` stops every running and queued job with that tag. It exits with 1 when there is no such job.
+
 ### Check the queue
 
 `junban ls` lists the running and waiting jobs, one job per line.
@@ -77,7 +91,7 @@ $ junban ls --summary
 cpus 1/4 running 1 queued 1
 ```
 
-To list only some jobs, use `--id N` for a job ID and `--dir NAME` for the directory shown as `dir=`. Both can be repeated, and they can be combined with each other and with `-a`. The exit status then tells whether any of those jobs is listed:
+To list only some jobs, use `--id N` for a job ID, `--dir NAME` for the directory shown as `dir=`, and `--tag TAG` for a tag. Both can be repeated, and they can be combined with each other and with `-a`. The exit status then tells whether any of those jobs is listed:
 
 ```console
 $ junban ls --id 63 --id 64

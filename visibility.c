@@ -68,6 +68,7 @@ void job_view(const struct Job *job, struct Job_view *view)
     if (job->started_at)
         view->elapsed = (job->finished_at ? job->finished_at : now) - job->started_at;
     safe_text(view->label, sizeof(view->label), job->label, 1);
+    if (job->tag) safe_text(view->tag, sizeof(view->tag), job->tag, 1);
     safe_text(view->command, sizeof(view->command), job->command, 0);
 }
 
@@ -149,6 +150,11 @@ int job_selected(const struct Job_view *view)
         }
         if (!found) return 0;
     }
+    if (command_line.num_tags) {
+        for (i = found = 0; i < command_line.num_tags && !found; ++i)
+            found = !strcmp(view->tag, command_line.tags[i]);
+        if (!found) return 0;
+    }
     return 1;
 }
 
@@ -164,9 +170,11 @@ int print_snapshot(const struct Snapshot *snapshot)
         char timing[128], cpus[32], status[48];
         view_cpus(v, cpus, sizeof(cpus));
         view_fields(v, timing, sizeof(timing));
-        printf("%s id=%d dir=%s cpus=%s %s",
+        printf("%s id=%d dir=%s",
                v->state == RUNNING ? "running" : v->state == QUEUED ? "queued" : "done",
-               v->jobid, v->label, cpus, timing);
+               v->jobid, v->label);
+        if (v->tag[0]) printf(" tag=%s", v->tag);
+        printf(" cpus=%s %s", cpus, timing);
         if (v->state != RUNNING && v->state != QUEUED) {
             view_status(v, status, sizeof(status));
             printf(" %s", status);

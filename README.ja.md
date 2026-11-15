@@ -58,6 +58,20 @@ $ junban run -c 8 --estimate 2h python train.py
 
 見込みは、待っているほかのジョブに表示されます。見込みを過ぎても、ジョブが打ち切られることはありません。
 
+### ジョブにタグを付ける
+
+`--tag` でジョブにタグを付けると、自分のジョブをまとめて扱えます。環境変数 `JUNBAN_TAG` を設定しておくと、`--tag` を省略してもそのタグが付きます。エージェントのセッションごとに一度設定しておけば、そのエージェントのジョブが自然にまとまります。タグには `A-Z a-z 0-9 . _ : @ + -` の文字を1〜63文字使えます。
+
+```console
+$ export JUNBAN_TAG=agent-1
+$ junban run -c 4 python train.py
+$ junban ls --tag agent-1
+running id=5 dir=demo tag=agent-1 cpus=4 elapsed=10s cmd=python train.py
+$ junban kill --tag agent-1
+```
+
+`junban kill --tag TAG` は、そのタグが付いた実行中・待機中のジョブをすべて止めます。該当するジョブがないときは終了コード 1 を返します。
+
 ### 状況を確認する
 
 `junban ls` で、実行中のジョブと待っているジョブを1行に1つずつ確認できます。
@@ -77,7 +91,7 @@ $ junban ls --summary
 cpus 1/4 running 1 queued 1
 ```
 
-一部のジョブだけを表示したいときは、ジョブIDを `--id N` で、ディレクトリ（`dir=` の名前）を `--dir NAME` で指定します。どちらも繰り返し指定でき、互いに、また `-a` とも組み合わせられます。このときの終了コードは、指定したジョブが表示されたかどうかを表します。
+一部のジョブだけを表示したいときは、ジョブIDを `--id N` で、ディレクトリ（`dir=` の名前）を `--dir NAME` で、タグを `--tag TAG` で指定します。どちらも繰り返し指定でき、互いに、また `-a` とも組み合わせられます。このときの終了コードは、指定したジョブが表示されたかどうかを表します。
 
 ```console
 $ junban ls --id 63 --id 64

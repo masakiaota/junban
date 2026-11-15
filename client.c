@@ -72,6 +72,7 @@ void c_new_job()
         m.u.newjob.label_size = strlen(command_line.label) + 1; /* add null */
     else
         m.u.newjob.label_size = 0;
+    m.u.newjob.tag_size = command_line.tag ? strlen(command_line.tag) + 1 : 0;
     m.u.newjob.num_slots = command_line.num_slots;
 
     /* Send the message */
@@ -87,6 +88,9 @@ void c_new_job()
 
     /* Send the label */
     send_bytes(server_socket, command_line.label, m.u.newjob.label_size);
+
+    /* Send the tag */
+    send_bytes(server_socket, command_line.tag, m.u.newjob.tag_size);
 
     free(new_command);
 }
@@ -235,6 +239,10 @@ void c_shutdown_server()
 
     m.type = KILL_SERVER;
     send_msg(server_socket, &m);
+    /* Stay connected until the server goes away: macOS refuses socket
+     * options on a connection whose peer already closed, and the server
+     * drops such a connection unread. */
+    while (recv_msg(server_socket, &m) > 0) {}
 }
 
 void c_kill_job()
@@ -247,6 +255,28 @@ void c_kill_job()
         error("queue disconnected during kill");
     if (m.type != KILL_JOB_OK)
         error("unknown job ID");
+}
+
+/* Stop every running or queued job carrying the tag. Returns how many. */
+int c_kill_tag(void)
+{
+    struct Snapshot snapshot = {0};
+    int killed = 0;
+    if (!fetch_snapshot(&snapshot)) error("queue disconnected while listing");
+    for (size_t i = 0; i < snapshot.count; ++i) {
+        const struct Job_view *v = &snapshot.jobs[i];
+        struct msg m = {0};
+        if ((v->state != RUNNING && v->state != QUEUED) || !job_selected(v)) continue;
+        m.type = KILL_JOB;
+        m.u.jobid = v->jobid;
+        send_msg(server_socket, &m);
+        if (recv_msg(server_socket, &m) != sizeof(m))
+            error("queue disconnected during kill");
+        /* A job that ended since the listing needs no stopping. */
+        if (m.type == KILL_JOB_OK) ++killed;
+    }
+    free(snapshot.jobs);
+    return killed;
 }
 
 void c_get_max_slots()

@@ -37,6 +37,7 @@ ROOT.mkdir(parents=True, exist_ok=True)
 MESSAGE = struct.Struct("=10i")
 _enum = (REPO / "main.h").read_text().split("enum msg_types")[1].split("{")[1].split("}")[0]
 TYPES = {name.strip(): i for i, name in enumerate(_enum.split(","))}
+PROTOCOL = int(re.search(r"PROTOCOL_VERSION=(\d+)", (REPO / "main.h").read_text()).group(1))
 
 
 def send_message(sock, kind, *values):
@@ -60,7 +61,7 @@ def connect_raw(q):
     s.settimeout(3)
     s.connect(os.path.relpath(q.path / "s"))
     send_message(s, "GET_VERSION")
-    assert receive_message(s)[:2] == (TYPES["VERSION"], 733)
+    assert receive_message(s)[:2] == (TYPES["VERSION"], PROTOCOL)
     return s
 
 
@@ -492,13 +493,13 @@ class QueueTests(unittest.TestCase):
                 connection, _ = listener.accept()
                 with connection:
                     self.assertEqual(receive_message(connection)[0], TYPES["GET_VERSION"])
-                    send_message(connection, "VERSION", 733)
+                    send_message(connection, "VERSION", PROTOCOL)
                     self.assertEqual(receive_message(connection)[0], TYPES["GET_MAX_SLOTS"])
                     send_message(connection, "GET_MAX_SLOTS_OK", 4)
                     new = receive_message(connection)
                     self.assertEqual(new[0], TYPES["NEWJOB"])
                     self.assertEqual(connection.recv(8, socket.MSG_WAITALL), struct.pack("=Q", 0))
-                    remaining = new[1] + new[4] + new[5]  # command, label, env
+                    remaining = new[1] + new[4] + new[5]  # command, label, tag
                     while remaining:
                         remaining -= len(connection.recv(remaining))
                     send_message(connection, "NEWJOB_OK", 0)
@@ -513,6 +514,22 @@ class QueueTests(unittest.TestCase):
                     self.assertEqual(p.wait(timeout=3), -signal.SIGKILL)
                     eventually(lambda: not alive(pgid))
                     self.assertFalse((q.path / "never").exists())
+            finally:
+                listener.close()
+
+    def test_shutdown_skips_version_check(self):
+        # An older server must still be stoppable after upgrading the client.
+        with Queue() as q:
+            listener = socket.socket(socket.AF_UNIX)
+            listener.bind(os.path.relpath(q.path / "s"))
+            listener.listen(1)
+            try:
+                p = q.popen("shutdown")
+                connection, _ = listener.accept()
+                with connection:
+                    self.assertEqual(receive_message(connection)[0], TYPES["KILL_SERVER"])
+                self.assertEqual(p.communicate(timeout=3), (b"", b""))
+                self.assertEqual(p.returncode, 0)
             finally:
                 listener.close()
 
@@ -777,6 +794,63 @@ class VisibilityOnlyTests(unittest.TestCase):
                          ["--summary", "--id", "1"], ["--summary", "--dir", "alpha"]):
                 self.own_failure(q.call("ls", *args))
             for name, p in (("a", a), ("b", b), ("c", c)):
+                q.release(name)
+                self.assertEqual(p.wait(timeout=3), 0)
+
+    def test_tags(self):
+        with Queue(4) as q:
+            def listed(*args):
+                code, out, err = q.call("ls", *args)
+                self.assertEqual((code, err), (0 if out else 1, b""), args)
+                return [(int(line.split()[1][3:]), re.search(r" tag=(\S+)", line) and
+                         re.search(r" tag=(\S+)", line).group(1))
+                        for line in out.decode().splitlines()]
+            def hold(name, *opts, env=None):
+                return q.popen("run", "-c", "1", *opts, PY, WORKER, "hold", name + ".pids",
+                               name + ".release", env=env or q.env)
+            agent = dict(q.env, JUNBAN_TAG="agent-1")
+            a = hold("a", env=agent)
+            q.pids("a")
+            b = hold("b", "--tag", "other", env=agent)
+            q.pids("b")
+            c = hold("c")
+            q.pids("c")
+            d = hold("d", "--tag", "agent-1")
+            q.pids("d")
+            e = q.popen("run", "--tag", "agent-1", PY, WORKER, "hold", "e.pids", "e.release")
+            eventually(lambda: len(listed()) == 5)
+            self.assertEqual(listed(), [(0, "agent-1"), (1, "other"), (2, None),
+                                        (3, "agent-1"), (4, "agent-1")])
+            self.assertRegex(q.call("ls", "--id", "0")[1].decode(),
+                             r"^running id=0 dir=\S+ tag=agent-1 cpus=1 elapsed=\d+s cmd=")
+            self.assertEqual(listed("--tag", "agent-1"), [(0, "agent-1"), (3, "agent-1"), (4, "agent-1")])
+            self.assertEqual(listed("--tag", "agent-1", "--tag", "other"),
+                             [(0, "agent-1"), (1, "other"), (3, "agent-1"), (4, "agent-1")])
+            self.assertEqual(listed("--tag", "agent-1", "--id", "1"), [])
+            self.assertEqual(listed("--tag", "nobody"), [])
+            # Killing by tag stops running jobs and removes queued ones, only for that tag.
+            self.assertEqual(q.call("kill", "--tag", "agent-1"), (0, b"", b""))
+            self.assertEqual(a.wait(timeout=3), 143)
+            self.assertEqual(d.wait(timeout=3), 143)
+            out, err = e.communicate(timeout=3)
+            self.own_failure((e.returncode, out, err), "removed")
+            eventually(lambda: listed() == [(1, "other"), (2, None)])
+            self.assertEqual(sorted(listed("-a", "--tag", "agent-1")),
+                             [(0, "agent-1"), (3, "agent-1"), (4, "agent-1")])
+            self.assertEqual(q.call("kill", "--tag", "agent-1"),
+                             (1, b"", b"junban: no running or queued job with tag agent-1\n"))
+            for args in (["run", "--tag", "", "true"], ["run", "--tag", "a b", "true"],
+                         ["run", "--tag", "x" * 64, "true"], ["run", "--tag"],
+                         ["run", "--tag", "a", "--tag", "b", "true"], ["ls", "--tag"],
+                         ["ls", "--tag", "a/b"], ["ls", "--summary", "--tag", "a"],
+                         ["kill", "--tag"], ["kill", "--tag", "a", "b"], ["kill", "--tag", "%"]):
+                self.own_failure(q.call(*args))
+            self.own_failure(q.call("run", "true", env=dict(q.env, JUNBAN_TAG="bad tag")), "JUNBAN_TAG")
+            self.assertEqual(q.call("run", "-c", "1", "true", env=dict(q.env, JUNBAN_TAG="")), (0, b"", b""))
+            self.assertEqual(q.call("run", "-c", "1", "--tag", "x" * 63, "true", env=agent), (0, b"", b""))
+            self.assertEqual(listed("-a", "--tag", "x" * 63)[0][1], "x" * 63)
+            self.assertEqual(listed("-a", "--id", "5"), [(5, None)])
+            for name, p in (("b", b), ("c", c)):
                 q.release(name)
                 self.assertEqual(p.wait(timeout=3), 0)
 

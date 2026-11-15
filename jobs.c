@@ -215,6 +215,7 @@ int s_newjob(int s, struct msg *m)
     p->kill_requested = 0;
     p->should_keep_finished = p->state != HOLDING_CLIENT;
     p->label = 0;
+    p->tag = 0;
 
     if (recv_bytes(s, (char *)&p->estimate, sizeof(p->estimate)) != (int)sizeof(p->estimate))
         goto disconnected;
@@ -242,6 +243,20 @@ int s_newjob(int s, struct msg *m)
         res = recv_bytes(s, ptr, m->u.newjob.label_size);
         if (res != m->u.newjob.label_size)
             goto disconnected;
+        ptr[m->u.newjob.label_size - 1] = '\0';
+    }
+
+    /* load the tag */
+    if (m->u.newjob.tag_size > 0)
+    {
+        p->tag = malloc(m->u.newjob.tag_size);
+        if (p->tag == 0)
+            error("Cannot allocate memory in s_newjob tag_size(%i)",
+                    m->u.newjob.tag_size);
+        res = recv_bytes(s, p->tag, m->u.newjob.tag_size);
+        if (res != m->u.newjob.tag_size)
+            goto disconnected;
+        p->tag[m->u.newjob.tag_size - 1] = '\0';
     }
 
     return p->jobid;
@@ -334,6 +349,7 @@ static void new_finished_job(struct Job *j)
         first_finished_job = first_finished_job->next;
         free(tmp->command);
         free(tmp->label);
+        free(tmp->tag);
         free(tmp);
     }
     p->next = j;
@@ -412,6 +428,7 @@ void job_finished(const struct Result *result, int jobid)
         if (!p->should_keep_finished) {
             free(p->command);
             free(p->label);
+            free(p->tag);
             free(p);
         }
     }

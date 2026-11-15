@@ -7,11 +7,12 @@
 */
 enum
 {
-    PROTOCOL_VERSION=733
+    PROTOCOL_VERSION=734
 };
 
 /* Retired message numbers and fields are reserved to preserve the 40-byte
- * frame and the version-733 layout. No retired request has a handler. */
+ * frame. No retired request has a handler. Version 734 adds the job tag
+ * to the NEWJOB payload and to Job_view. */
 enum msg_types
 {
     KILL_SERVER,
@@ -57,7 +58,7 @@ enum msg_types
 
 enum Request
 {
-    c_QUEUE, c_KILL_SERVER, c_LIST, c_KILL_JOB, c_WATCH
+    c_QUEUE, c_KILL_SERVER, c_LIST, c_KILL_JOB, c_WATCH, c_KILL_TAG
 };
 
 struct Command_line {
@@ -79,6 +80,9 @@ struct Command_line {
     int num_ids;
     char **dirs;
     int num_dirs;
+    char **tags;
+    int num_tags;
+    char *tag; /* The tag of a new job, or NULL. */
 };
 
 enum Process_type {
@@ -112,7 +116,7 @@ struct msg
             int reserved_store_output;
             int reserved_should_keep_finished;
             int label_size;
-            int reserved_env_size;
+            int tag_size;
             int reserved_do_depend;
             int reserved_depend_on;
             int reserved_wait_enqueuing;
@@ -150,6 +154,7 @@ struct Job
     int should_keep_finished;
     int pid;
     char *label;
+    char *tag;
     int num_slots;
     int cpus_unspecified;
     int kill_requested;
@@ -168,6 +173,7 @@ struct Job_view {
     double elapsed, waited;
     unsigned long long estimate;
     char label[128];
+    char tag[64];
     char command[81];
 };
 
@@ -207,6 +213,7 @@ void c_check_version();
 void c_send_runjob_ok(int pid);
 void c_shutdown_server();
 void c_kill_job();
+int c_kill_tag(void);
 void c_get_max_slots();
 
 /* jobs.c */

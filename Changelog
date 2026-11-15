@@ -12,6 +12,12 @@ Unreleased (behaviour changes for scripts):
    "cpus B/T running N queued N" moved to junban ls --summary. (#3)
  - junban ls exits with 1 when it lists no job (it used to exit with 0).
    It exits with 0 when it lists a job and 125 on junban errors. (#4)
+ - junban ls takes --id N and --dir NAME to list only some jobs. (#5)
+ - Jobs can carry a tag: junban run --tag TAG, or JUNBAN_TAG in the
+   environment. ls shows it as tag=TAG and takes --tag; junban kill --tag
+   stops all jobs with a tag. The protocol version is now 734, so a running
+   older server must be stopped with junban shutdown (which still works
+   across versions) after upgrading. (#6)
 
 ## Features to be implemented
 

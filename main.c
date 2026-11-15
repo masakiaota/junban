@@ -18,7 +18,7 @@ int server_socket = -1;
 
 static void usage(void)
 {
-    error("usage: run [-c N | --cpus N] [--estimate DUR] [--] command [args...]; ls [-a] [--id N]... [--dir NAME]... | ls --summary; watch; kill ID; shutdown; help; version");
+    error("usage: run [-c N | --cpus N] [--estimate DUR] [--tag TAG] [--] command [args...]; ls [-a] [--id N]... [--dir NAME]... [--tag TAG]... | ls --summary; watch; kill ID | kill --tag TAG; shutdown; help; version");
 }
 
 static unsigned long long duration(const char *s)
@@ -61,6 +61,17 @@ static char *caller_label(void)
     return label;
 }
 
+/* Tags appear verbatim in ls and are matched exactly, so keep them to one
+ * shell-safe word. */
+static char *checked_tag(char *tag, const char *source)
+{
+    size_t n = strlen(tag);
+    if (!n || n > 63 || strspn(tag, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+                                   "0123456789._:@+-") != n)
+        error("%s must be 1-63 characters of A-Z a-z 0-9 . _ : @ + -", source);
+    return tag;
+}
+
 static int number(const char *s, int minimum)
 {
     unsigned long n = 0;
@@ -82,22 +93,26 @@ int main(int argc, char **argv)
     if (!strcmp(argv[1], "help") || !strcmp(argv[1], "--help")) {
         if (argc != 2) usage();
         puts("Usage:");
-        puts("  junban run [-c N] [--estimate DUR] [--] COMMAND [ARGS...]");
+        puts("  junban run [-c N] [--estimate DUR] [--tag TAG] [--] COMMAND [ARGS...]");
         puts("      Wait for a turn, then run COMMAND as if it were run directly.");
         puts("      -c N, --cpus N   CPUs the job uses. Without it, the job takes all CPUs and runs alone.");
         puts("      --estimate DUR   Expected duration: 90s, 30m, 2h, 1d. Shown to others. Never a timeout.");
-        puts("  junban ls [-a] [--id N]... [--dir NAME]...");
+        puts("      --tag TAG        Label the job as yours. Default: $JUNBAN_TAG. Characters: A-Z a-z 0-9 . _ : @ + -");
+        puts("  junban ls [-a] [--id N]... [--dir NAME]... [--tag TAG]...");
         puts("      List running and queued jobs, one per line. -a adds the last 20 finished jobs.");
         puts("      --id N       Only job N. Repeat to list several IDs.");
-        puts("      --dir NAME   Only jobs whose dir= is NAME. Repeatable. Options combine with AND.");
+        puts("      --dir NAME   Only jobs whose dir= is NAME. Repeatable.");
+        puts("      --tag TAG    Only jobs tagged TAG. Repeatable. Different options combine with AND.");
         puts("  junban ls --summary   Print only the queue totals: cpus BUSY/TOTAL running N queued N.");
         puts("  junban watch       Live view for a terminal. q quits.");
         puts("  junban kill ID     Stop a running job, or remove a queued one.");
+        puts("  junban kill --tag TAG   Do that to every running and queued job tagged TAG.");
         puts("  junban shutdown    Stop the queue server.");
         puts("");
         puts("Fields in ls (stdout has job lines only; an empty queue prints nothing):");
         puts("  running|queued|done    Each line starts with the job's state.");
         puts("  id, dir, cmd           Job ID, directory it was started from, command.");
+        puts("  tag                    The job's tag, shown only when it has one.");
         puts("  cpus=N, cpus=all(N)    all(N): -c was not given, so the job takes all N CPUs.");
         puts("  elapsed, waited, est   Time running, time in the queue, declared estimate.");
         puts("  over                   The job has run longer than its estimate.");
@@ -117,10 +132,18 @@ int main(int argc, char **argv)
         const char *jobid = getenv("JUNBAN_JOB_ID");
         if (jobid)
             error("'junban run' cannot be called inside a junban job (job %s)", jobid);
+        char *tag = getenv("JUNBAN_TAG");
         command_line.request = c_QUEUE;
+        command_line.tag = tag && *tag ? checked_tag(tag, "JUNBAN_TAG") : NULL;
+        tag = NULL;
         /* Parse only the prefix; never permute the command's arguments. */
         while (i < argc && argv[i][0] == '-') {
             if (!strcmp(argv[i], "--")) { ++i; break; }
+            if (!strcmp(argv[i], "--tag")) {
+                if (tag || ++i == argc) usage();
+                command_line.tag = tag = checked_tag(argv[i++], "tag");
+                continue;
+            }
             if (!strcmp(argv[i], "--estimate")) {
                 if (command_line.estimate || ++i == argc) usage();
                 command_line.estimate = duration(argv[i++]);
@@ -138,7 +161,9 @@ int main(int argc, char **argv)
         command_line.request = c_LIST;
         command_line.ids = malloc(sizeof(int) * (size_t)argc);
         command_line.dirs = malloc(sizeof(char *) * (size_t)argc);
-        if (!command_line.ids || !command_line.dirs) error("out of memory");
+        command_line.tags = malloc(sizeof(char *) * (size_t)argc);
+        if (!command_line.ids || !command_line.dirs || !command_line.tags)
+            error("out of memory");
         for (; i < argc; ++i) {
             if (!strcmp(argv[i], "-a") && !command_line.list_all)
                 command_line.list_all = 1;
@@ -148,18 +173,26 @@ int main(int argc, char **argv)
                 command_line.ids[command_line.num_ids++] = number(argv[++i], 0);
             else if (!strcmp(argv[i], "--dir") && i + 1 < argc && argv[i + 1][0])
                 command_line.dirs[command_line.num_dirs++] = argv[++i];
+            else if (!strcmp(argv[i], "--tag") && i + 1 < argc)
+                command_line.tags[command_line.num_tags++] = checked_tag(argv[++i], "tag");
             else usage();
         }
         /* The summary describes the whole queue; it takes no job selection. */
         if (command_line.list_summary &&
-            (command_line.list_all || command_line.num_ids || command_line.num_dirs))
+            (command_line.list_all || command_line.num_ids || command_line.num_dirs ||
+             command_line.num_tags))
             usage();
     } else if (!strcmp(argv[1], "watch") && argc == 2) {
         if (!isatty(STDOUT_FILENO)) error("watch requires a terminal; use junban ls");
         command_line.request = c_WATCH;
     } else if (!strcmp(argv[1], "shutdown") && argc == 2)
         command_line.request = c_KILL_SERVER;
-    else if (!strcmp(argv[1], "kill") && argc == 3) {
+    else if (!strcmp(argv[1], "kill") && argc == 4 && !strcmp(argv[2], "--tag")) {
+        command_line.request = c_KILL_TAG;
+        command_line.tags = argv + 3;
+        command_line.num_tags = 1;
+        checked_tag(argv[3], "tag");
+    } else if (!strcmp(argv[1], "kill") && argc == 3) {
         command_line.request = c_KILL_JOB;
         command_line.jobid = number(argv[2], 0);
     } else usage();
@@ -167,7 +200,9 @@ int main(int argc, char **argv)
     ignore_sigpipe();
     unblock_sigint_and_install_handler();
     ensure_server_up();
-    c_check_version();
+    /* KILL_SERVER keeps its message number, so shutdown also stops a server
+     * of another protocol version, as needed when upgrading junban. */
+    if (command_line.request != c_KILL_SERVER) c_check_version();
     switch (command_line.request) {
     case c_QUEUE:
         c_get_max_slots();
@@ -189,11 +224,19 @@ int main(int argc, char **argv)
     case c_WATCH: c_watch(); break;
     case c_KILL_SERVER: c_shutdown_server(); break;
     case c_KILL_JOB: c_kill_job(); break;
+    case c_KILL_TAG:
+        /* Like pkill: 1 when no job carried the tag. */
+        if (!c_kill_tag()) {
+            fprintf(stderr, "junban: no running or queued job with tag %s\n", command_line.tags[0]);
+            status = 1;
+        }
+        break;
     default: usage();
     }
     close(server_socket);
     free(command_line.label);
     free(command_line.ids);
     free(command_line.dirs);
+    if (command_line.request == c_LIST) free(command_line.tags);
     return status;
 }
