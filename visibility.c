@@ -112,7 +112,11 @@ int fetch_snapshot(struct Snapshot *snapshot)
     snapshot->count = 0;
     for (;;) {
         if (recv_msg(server_socket, &m) != (int)sizeof(m)) return 0;
-        if (m.type == SNAPSHOT_END) { snapshot->total = m.u.max_slots; return 1; }
+        if (m.type == SNAPSHOT_END) {
+            snapshot->total = m.u.snapshot_end.max_slots;
+            snapshot->next_jobid = m.u.snapshot_end.next_jobid;
+            return 1;
+        }
         if (m.type == NEWJOB_NOK) return 0;
         if (m.type != SNAPSHOT_ROW) return 0;
         struct Job_view *next = realloc(snapshot->jobs, (count + 1) * sizeof(*next));

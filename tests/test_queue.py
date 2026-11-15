@@ -1006,6 +1006,59 @@ class VisibilityOnlyTests(unittest.TestCase):
             self.assertEqual(code, 125)
             self.assertIn(b"cannot wait for itself", err)
 
+    def test_review_fixes_wait_and_detach(self):
+        with Queue(2) as q:
+            # A tagged job running junban wait --tag on its own tag is refused.
+            env = dict(q.env, JUNBAN_TAG="self")
+            code, out, err = q.call("run", "-c", "1", "sh", "-c", BIN + " wait --tag self", env=env)
+            self.assertEqual(code, 125)
+            self.assertIn(b"cannot wait for itself", err)
+            # JUNBAN_TAG is only a default: a valid --tag overrides a bad one.
+            env = dict(q.env, JUNBAN_TAG="bad tag")
+            self.assertEqual(q.call("run", "-c", "1", "--tag", "good", "true", env=env), (0, b"", b""))
+            self.assertIn(b" tag=good ", q.call("ls", "-a", "--tag", "good")[1])
+            # A detached job holds no inherited descriptor, however high.
+            reader, writer = os.pipe()
+            def high_fd():
+                soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+                limit = 6000 if hard == resource.RLIM_INFINITY else min(hard, 6000)
+                resource.setrlimit(resource.RLIMIT_NOFILE, (limit, hard))
+                os.dup2(writer, limit - 1)
+            try:
+                p = q.popen("run", "--detach", "-c", "1", PY, WORKER, "hold", "high.pids",
+                            "high.release", preexec_fn=high_fd, close_fds=False)
+                os.close(writer)
+                writer = -1
+                self.assertEqual(p.wait(timeout=3), 0)
+                q.pids("high")
+                self.assertTrue(select.select([reader], [], [], 3)[0])
+                self.assertEqual(os.read(reader, 1), b"")
+            finally:
+                os.close(reader)
+                if writer >= 0:
+                    os.close(writer)
+            q.release("high")
+
+    def test_wait_timeout_covers_stalled_server(self):
+        with Queue() as q:
+            listener = socket.socket(socket.AF_UNIX)
+            listener.bind(os.path.relpath(q.path / "s"))
+            listener.listen(1)
+            try:
+                started = time.monotonic()
+                p = q.popen("wait", "--timeout", "1s", "0")
+                connection, _ = listener.accept()
+                with connection:
+                    self.assertEqual(receive_message(connection)[0], TYPES["GET_VERSION"])
+                    send_message(connection, "VERSION", PROTOCOL)
+                    self.assertEqual(receive_message(connection)[0], TYPES["JOB_INFO"])
+                    out, err = p.communicate(timeout=5)
+                self.assertEqual((p.returncode, out), (124, b""))
+                self.assertIn(b"timed out", err)
+                self.assertLess(time.monotonic() - started, 3)
+            finally:
+                listener.close()
+
     def test_estimate_parsing_and_units(self):
         with Queue() as q:
             for value in ("", "1", "s", "0s", "-1m", "+1s", "1.5h", "1ms", "1w",

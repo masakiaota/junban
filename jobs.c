@@ -135,7 +135,8 @@ void s_snapshot(int socket, int all)
     for (int i = count - 1; i >= 0 && i >= count - 20 && limit; --i, --limit)
         send_view(socket, finished[i % 20]);
     end.type = SNAPSHOT_END;
-    end.u.max_slots = max_slots;
+    end.u.snapshot_end.max_slots = max_slots;
+    end.u.snapshot_end.next_jobid = jobids;
     send_msg(socket, &end);
 }
 

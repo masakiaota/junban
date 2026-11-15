@@ -151,10 +151,8 @@ int main(int argc, char **argv)
         const char *jobid = getenv("JUNBAN_JOB_ID");
         if (jobid)
             error("'junban run' cannot be called inside a junban job (job %s)", jobid);
-        char *tag = getenv("JUNBAN_TAG");
+        char *tag = NULL;
         command_line.request = c_QUEUE;
-        command_line.tag = tag && *tag ? checked_tag(tag, "JUNBAN_TAG") : NULL;
-        tag = NULL;
         /* Parse only the prefix; never permute the command's arguments. */
         while (i < argc && argv[i][0] == '-') {
             if (!strcmp(argv[i], "--")) { ++i; break; }
@@ -179,6 +177,9 @@ int main(int argc, char **argv)
             command_line.num_slots = number(argv[i++], 1);
         }
         if (i == argc) usage();
+        /* JUNBAN_TAG is only a default for an omitted --tag. */
+        if (!tag && (tag = getenv("JUNBAN_TAG")) && *tag)
+            command_line.tag = checked_tag(tag, "JUNBAN_TAG");
         command_line.command.array = argv + i;
         command_line.command.num = argc - i;
         command_line.label = caller_label();
@@ -208,7 +209,6 @@ int main(int argc, char **argv)
              command_line.num_tags))
             usage();
     } else if (!strcmp(argv[1], "wait")) {
-        const char *self = getenv("JUNBAN_JOB_ID");
         command_line.request = c_WAIT;
         command_line.ids = malloc(sizeof(int) * (size_t)argc);
         command_line.tags = malloc(sizeof(char *) * (size_t)argc);
@@ -224,10 +224,6 @@ int main(int argc, char **argv)
                 command_line.ids[command_line.num_ids++] = number(argv[i], 0);
         }
         if (!command_line.num_ids && !command_line.num_tags) usage();
-        /* A job waiting for itself would never finish. */
-        for (int n = 0; self && n < command_line.num_ids; ++n)
-            if (command_line.ids[n] == atoi(self))
-                error("job %s cannot wait for itself", self);
     } else if (!strcmp(argv[1], "watch") && argc == 2) {
         if (!isatty(STDOUT_FILENO)) error("watch requires a terminal; use junban ls");
         command_line.request = c_WATCH;

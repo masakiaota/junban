@@ -145,6 +145,11 @@ struct msg
         int size;
         int reserved_last_errorlevel;
         int max_slots;
+        /* SNAPSHOT_END: max_slots aliases u.max_slots. */
+        struct {
+            int max_slots;
+            int next_jobid;
+        } snapshot_end;
         int version;
     } u;
 };
@@ -186,6 +191,7 @@ struct Job_view {
 
 struct Snapshot {
     int busy, total, running, queued;
+    int next_jobid; /* The ID the next job gets, read with the same listing. */
     size_t count;
     struct Job_view *jobs;
 };

@@ -339,9 +339,39 @@ void c_detach(void)
     /* Hold none of the caller's pipes, or a caller reading them to EOF
      * would wait for the job. */
     if (getrlimit(RLIMIT_NOFILE, &lim) == 0)
-        for (int i = 3; (rlim_t)i < lim.rlim_cur && i < 4096; ++i)
+        for (int i = 3; (rlim_t)i < lim.rlim_cur && i < INT_MAX; ++i)
             if (i != server_socket) close(i);
     free(log);
+}
+
+static double wait_deadline; /* Zero: junban wait has no timeout. */
+static int wait_self = -1;    /* The calling job's ID inside a junban job. */
+
+/* A queue request of junban wait failed or ran into the timeout. */
+static _Noreturn void wait_request_failed(void)
+{
+    if (wait_deadline && monotime() >= wait_deadline) {
+        fputs("junban: timed out waiting for the queue\n", stderr);
+        exit(124);
+    }
+    error("queue disconnected while waiting");
+}
+
+/* Bound each request by the time left, so a stalled server cannot hold
+ * junban wait much past its timeout. */
+static void wait_io_timeout(void)
+{
+    double left;
+    struct timeval timeout;
+    if (!wait_deadline) return;
+    /* A short grace lets a responsive server answer the last check. */
+    left = wait_deadline - monotime();
+    left = (left > 0 ? left : 0) + 0.1;
+    timeout.tv_sec = (time_t)left;
+    timeout.tv_usec = (suseconds_t)((left - (double)timeout.tv_sec) * 1e6) + 1;
+    if (timeout.tv_usec >= 1000000) { ++timeout.tv_sec; timeout.tv_usec -= 1000000; }
+    setsockopt(server_socket, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    setsockopt(server_socket, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
 }
 
 /* 1 with the job's view, 0 for an ID the queue does not know. */
@@ -350,13 +380,13 @@ static int job_info(int jobid, struct Job_view *view)
     struct msg m = {0};
     m.type = JOB_INFO;
     m.u.jobid = jobid;
+    wait_io_timeout();
     send_msg(server_socket, &m);
-    if (recv_msg(server_socket, &m) != sizeof(m))
-        error("queue disconnected while waiting");
+    if (recv_msg(server_socket, &m) != sizeof(m)) wait_request_failed();
     if (m.type == NEWJOB_NOK) return 0;
     if (m.type != SNAPSHOT_ROW ||
         recv_bytes(server_socket, (char *)view, sizeof(*view)) != (int)sizeof(*view))
-        error("queue disconnected while waiting");
+        wait_request_failed();
     return 1;
 }
 
@@ -367,9 +397,10 @@ static int next_jobid(void)
     struct msg m = {0};
     m.type = JOB_INFO;
     m.u.jobid = -1;
+    wait_io_timeout();
     send_msg(server_socket, &m);
     if (recv_msg(server_socket, &m) != sizeof(m) || m.type != JOB_INFO)
-        error("queue disconnected while waiting");
+        wait_request_failed();
     return m.u.jobid;
 }
 
@@ -384,6 +415,8 @@ static void add_target(struct Target **targets, int *count, int *size, int jobid
 {
     for (int i = 0; i < *count; ++i)
         if ((*targets)[i].jobid == jobid) return;
+    /* A job waiting for itself would never finish. */
+    if (jobid == wait_self) error("job %d cannot wait for itself", jobid);
     if (*count == *size) {
         *size = *size * 2 + 8;
         struct Target *more = realloc(*targets, sizeof(**targets) * (size_t)*size);
@@ -395,19 +428,26 @@ static void add_target(struct Target **targets, int *count, int *size, int jobid
 }
 
 /* Wait until the given jobs have finished, and the tagged jobs that were
- * running or queued when the wait began or were queued since. Returns the highest exit status among them, or 124 when
- * the timeout passes first. Unknown IDs are junban errors. */
+ * running or queued when the wait began or were queued since. Returns the
+ * highest exit status among them, or 124 when the timeout passes first.
+ * Unknown IDs are junban errors. */
 int c_wait(void)
 {
     struct Target *targets = NULL;
     int count = 0, size = 0, status = 0, scanned = 0;
+    const char *self = getenv("JUNBAN_JOB_ID");
     double deadline = command_line.timeout ? monotime() + (double)command_line.timeout : 0;
+    wait_deadline = deadline;
+    if (self) wait_self = atoi(self);
     for (int i = 0; i < command_line.num_ids; ++i)
         add_target(&targets, &count, &size, command_line.ids[i]);
     if (command_line.num_tags) {
+        /* The active jobs and the next-ID boundary come from one reply, so
+         * no tagged job falls between them. */
         struct Snapshot snapshot = {0};
-        scanned = next_jobid();
-        if (!fetch_snapshot(&snapshot)) error("queue disconnected while waiting");
+        wait_io_timeout();
+        if (!fetch_snapshot(&snapshot)) wait_request_failed();
+        scanned = snapshot.next_jobid;
         for (size_t i = 0; i < snapshot.count; ++i) {
             const struct Job_view *v = &snapshot.jobs[i];
             if ((v->state == RUNNING || v->state == QUEUED) && tagged(v))
@@ -442,8 +482,10 @@ int c_wait(void)
                 fflush(stdout);
             }
         }
-        if (finished == count) break;
-        double now = monotime(), delay = 0.2;
+        /* Return only if no tagged job was queued during this pass. */
+        int pending = finished < count || (command_line.num_tags && next_jobid() != scanned);
+        if (!pending) break;
+        double now = monotime(), delay = finished < count ? 0.2 : 0;
         if (deadline && now >= deadline) {
             fprintf(stderr, "junban: timed out with %d of %d jobs unfinished\n",
                     count - finished, count);
@@ -452,7 +494,7 @@ int c_wait(void)
         }
         if (deadline && deadline - now < delay) delay = deadline - now;
         struct timespec pause = {0, (long)(delay * 1e9)};
-        nanosleep(&pause, NULL);
+        if (delay > 0) nanosleep(&pause, NULL);
     }
     free(targets);
     return status;
