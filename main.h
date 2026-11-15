@@ -179,7 +179,7 @@ void view_cpus(const struct Job_view *view, char *dst, size_t size);
 void view_fields(const struct Job_view *view, char *dst, size_t size);
 void view_status(const struct Job_view *view, char *dst, size_t size);
 void print_summary(const struct Snapshot *snapshot);
-void print_snapshot(const struct Snapshot *snapshot);
+int print_snapshot(const struct Snapshot *snapshot);
 int fetch_snapshot(struct Snapshot *snapshot);
 void s_snapshot(int socket, int all);
 void s_wait_notice(int socket, int jobid);

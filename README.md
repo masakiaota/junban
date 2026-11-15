@@ -70,7 +70,7 @@ queued id=1 dir=demo cpus=all(4) waited=1s est=5m cmd=sh -c echo evaluated
 
 `dir` is the name of the directory the job was started from. `cpus=all(4)` means the job was started without `-c`. A job that has run past its estimate is marked `over`. To see finished jobs as well, use `junban ls -a`; their lines start with `done`.
 
-Standard output of `junban ls` carries job lines only, and every line starts with the job's state: `running`, `queued` or `done`. When there are no jobs, it prints nothing. To see how many CPUs are in use, use `junban ls --summary`:
+Standard output of `junban ls` carries job lines only, and every line starts with the job's state: `running`, `queued` or `done`. When there are no jobs, it prints nothing. Like `grep`, `junban ls` exits with 0 when it listed at least one job, 1 when it listed none, and 125 for junban's own errors. To see how many CPUs are in use, use `junban ls --summary`:
 
 ```console
 $ junban ls --summary

@@ -10,6 +10,8 @@ Unreleased (behaviour changes for scripts):
  - junban ls prints only job lines on standard output, each starting with
    running, queued or done. An empty queue prints nothing. The summary line
    "cpus B/T running N queued N" moved to junban ls --summary. (#3)
+ - junban ls exits with 1 when it lists no job (it used to exit with 0).
+   It exits with 0 when it lists a job and 125 on junban errors. (#4)
 
 ## Features to be implemented
 

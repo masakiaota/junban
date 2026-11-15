@@ -100,6 +100,7 @@ int main(int argc, char **argv)
         puts("  over                   The job has run longer than its estimate.");
         puts("  exit=N, signal=N, killed, client-lost   How a finished job ended.");
         puts("");
+        puts("Exit status of ls: 0 if it listed a job, 1 if it listed none, 125 on junban errors.");
         puts("Exit status of run: the command's own, or 128+N if signal N killed it.");
         puts("  125: junban could not queue or run it. 126: not executable. 127: not found.");
         return 0;
@@ -167,8 +168,9 @@ int main(int argc, char **argv)
     case c_LIST: {
         struct Snapshot snapshot = {0};
         if (!fetch_snapshot(&snapshot)) error("queue disconnected while listing");
+        /* Like grep: 0 when a job matched, 1 when none did. */
         if (command_line.list_summary) print_summary(&snapshot);
-        else print_snapshot(&snapshot);
+        else status = print_snapshot(&snapshot) ? 0 : 1;
         free(snapshot.jobs);
         break;
     }

@@ -118,7 +118,7 @@ class Queue:
 
     def rows(self):
         code, out, err = self.call("ls")
-        assert code == 0 and err == b"", (code, out, err)
+        assert code == (0 if out else 1) and err == b"", (code, out, err)
         rows = []
         for line in out.decode().splitlines():
             fields = line.split()
@@ -210,7 +210,7 @@ class QueueTests(unittest.TestCase):
     def test_transparency(self):
         with Queue() as q:
             server_env = dict(q.env, MARK="server", SERVER_ONLY="server")
-            self.assertEqual(q.call("ls", env=server_env)[0], 0)
+            self.assertEqual(q.call("ls", env=server_env)[0], 1)
             for name in ("a", "b"):
                 directory = q.path / name
                 directory.mkdir()
@@ -576,7 +576,7 @@ class QueueTests(unittest.TestCase):
             def limited_fds():
                 soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
                 resource.setrlimit(resource.RLIMIT_NOFILE, (64, hard))
-            self.assertEqual(q.call("ls", preexec_fn=limited_fds)[0], 0)
+            self.assertEqual(q.call("ls", preexec_fn=limited_fds)[0], 1)
             server = q.server()
             inode = (q.path / "s").stat().st_ino
             blocker = q.start("blocker", tree=True)
@@ -700,7 +700,7 @@ class VisibilityOnlyTests(unittest.TestCase):
 
     def listing(self, q, all=False):
         code, out, err = q.call("ls", *(["-a"] if all else []))
-        self.assertEqual((code, err), (0, b""))
+        self.assertEqual((code, err), (0 if out else 1, b""))
         self.assertNotIn(b"junban:", out)
         self.assertNotIn(b"\x1b", out)
         return out.decode().splitlines()
@@ -712,13 +712,30 @@ class VisibilityOnlyTests(unittest.TestCase):
                 self.assertEqual((code, err), (0, b""))
                 self.assertTrue(out)
                 self.assertNotIn(b"junban:", out)
-            self.assertEqual(q.call("ls"), (0, b"", b""))
+            self.assertEqual(q.call("ls"), (1, b"", b""))
+            self.assertEqual(q.call("ls", "-a"), (1, b"", b""))
             self.assertEqual(q.call("ls", "--summary"), (0, b"cpus 0/4 running 0 queued 0\n", b""))
             for args in (["--summary", "-a"], ["-a", "-a"], ["--summary", "--summary"]):
                 self.own_failure(q.call("ls", *args))
             self.assertEqual(q.call("run", "sh", "-c", "printf OUT; printf ERR >&2"),
                              (0, b"OUT", b"ERR"))
             self.own_failure(q.call("ls", "--bad"))
+
+    def test_ls_exit_status(self):
+        with Queue(2) as q:
+            self.assertEqual(q.call("ls"), (1, b"", b""))
+            p = q.start("job", 1)
+            q.pids("job")
+            code, out, err = q.call("ls")
+            self.assertEqual((code, err), (0, b""))
+            self.assertTrue(out.startswith(b"running id=0 "))
+            q.release("job")
+            self.assertEqual(p.wait(timeout=3), 0)
+            eventually(lambda: q.call("ls")[0] == 1)
+            self.assertEqual(q.call("ls", "-a")[0], 0)
+            env = dict(q.env, JUNBAN_SOCKET="missing/s")
+            for args in (["ls"], ["ls", "-a"], ["ls", "--summary"]):
+                self.own_failure(q.call(*args, env=env))
 
     def test_estimate_parsing_and_units(self):
         with Queue() as q:
@@ -1071,7 +1088,7 @@ class ReviewFixTests(unittest.TestCase):
                     # Leave the stalled connection open throughout recovery.
                     self.assertEqual(following.wait(timeout=6), 0)
                     out, err = listing.communicate(timeout=3)
-                    self.assertEqual((listing.returncode, err), (0, b""))
+                    self.assertEqual((listing.returncode, err), (0 if out else 1, b""))
                     self.assertRegex(out, rb"^(?:(?:running|queued) id=\d+ .*\n)*$")
                     self.assertEqual(bad.recv(1), b"")
 
@@ -1089,7 +1106,7 @@ class ReviewFixTests(unittest.TestCase):
                 self.assertEqual(running.wait(timeout=3), 0)
                 listing = q.popen("ls")
                 out, err = listing.communicate(timeout=7)
-                self.assertEqual((listing.returncode, err), (0, b""))
+                self.assertEqual((listing.returncode, err), (0 if out else 1, b""))
                 self.assertRegex(out, rb"^(?:(?:running|queued) id=\d+ .*\n)*$")
                 eventually(lambda: all(p.poll() == 0 for p in waiting), 8)
 
@@ -1114,7 +1131,7 @@ class ReviewFixTests(unittest.TestCase):
                 q.release("running")
                 self.assertEqual(running.wait(timeout=3), 0)
                 eventually(lambda: all(p.poll() == 0 for p in waiting), 8)
-                self.assertEqual(q.call("ls")[0], 0)
+                self.assertEqual(q.call("ls")[0], 1)
                 self.assertIsNone(listing.poll(), "stdout must still be blocked")
                 listing.kill()
                 listing.wait(timeout=3)
@@ -1144,7 +1161,7 @@ class ReviewFixTests(unittest.TestCase):
                 q.release("running")
                 self.assertEqual(running.wait(timeout=3), 0)
                 eventually(lambda: all(p.poll() == 0 for p in waiting), 8)
-                self.assertEqual(q.call("ls")[0], 0)
+                self.assertEqual(q.call("ls")[0], 1)
                 self.assertIsNone(monitor.poll(), "terminal output must still be blocked")
                 monitor.kill()
                 monitor.wait(timeout=3)

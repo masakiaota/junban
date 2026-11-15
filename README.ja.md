@@ -70,7 +70,7 @@ queued id=1 dir=demo cpus=all(4) waited=1s est=5m cmd=sh -c echo evaluated
 
 `dir` は、ジョブを投入したディレクトリの名前です。`cpus=all(4)` は、`-c` を省略したジョブです。見込みの時間を過ぎたジョブには `over` と表示されます。終わったジョブも見たいときは `junban ls -a` を使います。終わったジョブの行は `done` で始まります。
 
-`junban ls` の標準出力には、ジョブの行だけが出ます。どの行も、ジョブの状態（`running`、`queued`、`done`）で始まります。ジョブがないときは何も出力しません。CPUの使用状況を見たいときは `junban ls --summary` を使います。
+`junban ls` の標準出力には、ジョブの行だけが出ます。どの行も、ジョブの状態（`running`、`queued`、`done`）で始まります。ジョブがないときは何も出力しません。終了コードは `grep` と同じく、ジョブを1件以上表示したときは 0、1件もなかったときは 1、junban 自身のエラーのときは 125 です。CPUの使用状況を見たいときは `junban ls --summary` を使います。
 
 ```console
 $ junban ls --summary

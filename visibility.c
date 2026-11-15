@@ -132,9 +132,11 @@ void print_summary(const struct Snapshot *snapshot)
            snapshot->running, snapshot->queued);
 }
 
-/* stdout carries job lines only, so an empty queue prints nothing. */
-void print_snapshot(const struct Snapshot *snapshot)
+/* stdout carries job lines only, so an empty queue prints nothing.
+ * Returns the number of lines printed. */
+int print_snapshot(const struct Snapshot *snapshot)
 {
+    int printed = 0;
     for (size_t i = 0; i < snapshot->count; ++i) {
         const struct Job_view *v = &snapshot->jobs[i];
         if (!command_line.list_all && v->state != RUNNING && v->state != QUEUED) continue;
@@ -149,5 +151,7 @@ void print_snapshot(const struct Snapshot *snapshot)
             printf(" %s", status);
         }
         printf(" cmd=%s\n", v->command);
+        ++printed;
     }
+    return printed;
 }
