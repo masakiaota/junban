@@ -60,16 +60,22 @@ $ junban run -c 8 --estimate 2h python train.py
 
 ### 状況を確認する
 
-`junban ls` で、実行中のジョブと待っているジョブを確認できます。
+`junban ls` で、実行中のジョブと待っているジョブを1行に1つずつ確認できます。
 
 ```console
 $ junban ls
-cpus 1/4 running 1 queued 1
 running id=0 dir=demo cpus=1 elapsed=1s est=30m cmd=sleep 30
 queued id=1 dir=demo cpus=all(4) waited=1s est=5m cmd=sh -c echo evaluated
 ```
 
-`dir` は、ジョブを投入したディレクトリの名前です。`cpus=all(4)` は、`-c` を省略したジョブです。見込みの時間を過ぎたジョブには `over` と表示されます。終わったジョブも見たいときは `junban ls -a` を使います。
+`dir` は、ジョブを投入したディレクトリの名前です。`cpus=all(4)` は、`-c` を省略したジョブです。見込みの時間を過ぎたジョブには `over` と表示されます。終わったジョブも見たいときは `junban ls -a` を使います。終わったジョブの行は `done` で始まります。
+
+`junban ls` の標準出力には、ジョブの行だけが出ます。どの行も、ジョブの状態（`running`、`queued`、`done`）で始まります。ジョブがないときは何も出力しません。CPUの使用状況を見たいときは `junban ls --summary` を使います。
+
+```console
+$ junban ls --summary
+cpus 1/4 running 1 queued 1
+```
 
 人間が見るときは `junban watch` が便利です。画面が2秒ごとに更新されます。`q` で終了します。
 

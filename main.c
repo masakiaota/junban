@@ -18,7 +18,7 @@ int server_socket = -1;
 
 static void usage(void)
 {
-    error("usage: run [-c N | --cpus N] [--estimate DUR] [--] command [args...]; ls [-a]; watch; kill ID; shutdown; help; version");
+    error("usage: run [-c N | --cpus N] [--estimate DUR] [--] command [args...]; ls [-a] | ls --summary; watch; kill ID; shutdown; help; version");
 }
 
 static unsigned long long duration(const char *s)
@@ -86,12 +86,14 @@ int main(int argc, char **argv)
         puts("      Wait for a turn, then run COMMAND as if it were run directly.");
         puts("      -c N, --cpus N   CPUs the job uses. Without it, the job takes all CPUs and runs alone.");
         puts("      --estimate DUR   Expected duration: 90s, 30m, 2h, 1d. Shown to others. Never a timeout.");
-        puts("  junban ls [-a]     List running and queued jobs. -a adds the last 20 finished jobs.");
+        puts("  junban ls [-a]     List running and queued jobs, one per line. -a adds the last 20 finished jobs.");
+        puts("  junban ls --summary   Print only the queue totals: cpus BUSY/TOTAL running N queued N.");
         puts("  junban watch       Live view for a terminal. q quits.");
         puts("  junban kill ID     Stop a running job, or remove a queued one.");
         puts("  junban shutdown    Stop the queue server.");
         puts("");
-        puts("Fields in ls:");
+        puts("Fields in ls (stdout has job lines only; an empty queue prints nothing):");
+        puts("  running|queued|done    Each line starts with the job's state.");
         puts("  id, dir, cmd           Job ID, directory it was started from, command.");
         puts("  cpus=N, cpus=all(N)    all(N): -c was not given, so the job takes all N CPUs.");
         puts("  elapsed, waited, est   Time running, time in the queue, declared estimate.");
@@ -128,10 +130,17 @@ int main(int argc, char **argv)
         command_line.command.array = argv + i;
         command_line.command.num = argc - i;
         command_line.label = caller_label();
-    } else if (!strcmp(argv[1], "ls") &&
-               (argc == 2 || (argc == 3 && !strcmp(argv[2], "-a")))) {
+    } else if (!strcmp(argv[1], "ls")) {
         command_line.request = c_LIST;
-        command_line.list_all = argc == 3;
+        for (; i < argc; ++i) {
+            if (!strcmp(argv[i], "-a") && !command_line.list_all)
+                command_line.list_all = 1;
+            else if (!strcmp(argv[i], "--summary") && !command_line.list_summary)
+                command_line.list_summary = 1;
+            else usage();
+        }
+        /* The summary describes the whole queue; it takes no job selection. */
+        if (command_line.list_summary && command_line.list_all) usage();
     } else if (!strcmp(argv[1], "watch") && argc == 2) {
         if (!isatty(STDOUT_FILENO)) error("watch requires a terminal; use junban ls");
         command_line.request = c_WATCH;
@@ -158,7 +167,8 @@ int main(int argc, char **argv)
     case c_LIST: {
         struct Snapshot snapshot = {0};
         if (!fetch_snapshot(&snapshot)) error("queue disconnected while listing");
-        print_snapshot(&snapshot);
+        if (command_line.list_summary) print_summary(&snapshot);
+        else print_snapshot(&snapshot);
         free(snapshot.jobs);
         break;
     }

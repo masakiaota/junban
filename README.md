@@ -60,16 +60,22 @@ The estimate is shown to jobs that are waiting. A job is never stopped for runni
 
 ### Check the queue
 
-`junban ls` lists the running and waiting jobs.
+`junban ls` lists the running and waiting jobs, one job per line.
 
 ```console
 $ junban ls
-cpus 1/4 running 1 queued 1
 running id=0 dir=demo cpus=1 elapsed=1s est=30m cmd=sleep 30
 queued id=1 dir=demo cpus=all(4) waited=1s est=5m cmd=sh -c echo evaluated
 ```
 
-`dir` is the name of the directory the job was started from. `cpus=all(4)` means the job was started without `-c`. A job that has run past its estimate is marked `over`. To see finished jobs as well, use `junban ls -a`.
+`dir` is the name of the directory the job was started from. `cpus=all(4)` means the job was started without `-c`. A job that has run past its estimate is marked `over`. To see finished jobs as well, use `junban ls -a`; their lines start with `done`.
+
+Standard output of `junban ls` carries job lines only, and every line starts with the job's state: `running`, `queued` or `done`. When there are no jobs, it prints nothing. To see how many CPUs are in use, use `junban ls --summary`:
+
+```console
+$ junban ls --summary
+cpus 1/4 running 1 queued 1
+```
 
 For people, `junban watch` is easier to read. The screen refreshes every two seconds. Press `q` to quit.
 

@@ -126,10 +126,15 @@ int fetch_snapshot(struct Snapshot *snapshot)
     }
 }
 
-void print_snapshot(const struct Snapshot *snapshot)
+void print_summary(const struct Snapshot *snapshot)
 {
     printf("cpus %d/%d running %d queued %d\n", snapshot->busy, snapshot->total,
            snapshot->running, snapshot->queued);
+}
+
+/* stdout carries job lines only, so an empty queue prints nothing. */
+void print_snapshot(const struct Snapshot *snapshot)
+{
     for (size_t i = 0; i < snapshot->count; ++i) {
         const struct Job_view *v = &snapshot->jobs[i];
         if (!command_line.list_all && v->state != RUNNING && v->state != QUEUED) continue;

@@ -359,7 +359,7 @@ class QueueTests(unittest.TestCase):
         with Queue() as q:
             env = dict(q.env)
             env.pop("JUNBAN_SLOTS")
-            code, out, err = q.call("ls", env=env)
+            code, out, err = q.call("ls", "--summary", env=env)
             self.assertEqual((code, err), (0, b""))
             self.assertIn(("/%d " % os.cpu_count()).encode(), out)
         with Queue(4) as q:
@@ -712,7 +712,10 @@ class VisibilityOnlyTests(unittest.TestCase):
                 self.assertEqual((code, err), (0, b""))
                 self.assertTrue(out)
                 self.assertNotIn(b"junban:", out)
-            self.assertEqual(self.listing(q), ["cpus 0/4 running 0 queued 0"])
+            self.assertEqual(q.call("ls"), (0, b"", b""))
+            self.assertEqual(q.call("ls", "--summary"), (0, b"cpus 0/4 running 0 queued 0\n", b""))
+            for args in (["--summary", "-a"], ["-a", "-a"], ["--summary", "--summary"]):
+                self.own_failure(q.call("ls", *args))
             self.assertEqual(q.call("run", "sh", "-c", "printf OUT; printf ERR >&2"),
                              (0, b"OUT", b"ERR"))
             self.own_failure(q.call("ls", "--bad"))
@@ -744,7 +747,7 @@ class VisibilityOnlyTests(unittest.TestCase):
                 directory.mkdir()
                 env = dict(q.env, JUNBAN_SOCKET="../s")
                 self.assertEqual(q.call("run", "true", cwd=directory, env=env), (0, b"", b""))
-            lines = eventually(lambda: self.listing(q, True) if len(self.listing(q, True)) == 4 else None)
+            lines = eventually(lambda: self.listing(q, True) if len(self.listing(q, True)) == 3 else None)
             self.assertTrue(any(" dir=AHC075-a " in line for line in lines))
             self.assertTrue(any(" dir=kaggle-x " in line for line in lines))
             self.assertTrue(any(" dir=space%0A%1B-label " in line for line in lines))
@@ -755,11 +758,11 @@ class VisibilityOnlyTests(unittest.TestCase):
             for i in range(25):
                 self.assertEqual(q.call("run", "sh", "-c", "exit %d" % (i % 8)),
                                  (i % 8, b"", b""))
-            eventually(lambda: len(self.listing(q, True)) == 21)
+            eventually(lambda: len(self.listing(q, True)) == 20)
             short, full = self.listing(q), self.listing(q, True)
-            self.assertEqual(short, ["cpus 0/4 running 0 queued 0"])
-            self.assertEqual([int(line.split()[1].split("=")[1]) for line in full[1:]], list(range(24, 4, -1)))
-            for i, line in zip(range(24, 4, -1), full[1:]):
+            self.assertEqual(short, [])
+            self.assertEqual([int(line.split()[1].split("=")[1]) for line in full], list(range(24, 4, -1)))
+            for i, line in zip(range(24, 4, -1), full):
                 self.assertRegex(line, r"^done id=%d dir=\S+ cpus=all\(4\) elapsed=\d+s exit=%d cmd=sh -c exit %d$"
                                  % (i, i % 8, i % 8))
             self.own_failure(q.call("kill", "24"), "unknown")
@@ -775,12 +778,13 @@ class VisibilityOnlyTests(unittest.TestCase):
             later = q.start("later", 1)
             q.wait_rows(3)
             lines = self.listing(q)
-            self.assertEqual(lines[0], "cpus 3/4 running 1 queued 2")
-            self.assertRegex(lines[1], r"^running id=0 dir=\S+ cpus=3 elapsed=\d+s est=1s(?: over)? cmd=.+")
-            self.assertRegex(lines[2], r"^queued id=1 dir=\S+ cpus=all\(4\) waited=\d+s est=2m cmd=.+")
-            self.assertRegex(lines[3], r"^queued id=2 dir=\S+ cpus=1 waited=\d+s cmd=.+")
-            self.assertLessEqual(len(lines[1].split(" cmd=", 1)[1]), 80)
-            eventually(lambda: " over " in self.listing(q)[1])
+            self.assertEqual(q.call("ls", "--summary"), (0, b"cpus 3/4 running 1 queued 2\n", b""))
+            self.assertEqual(len(lines), 3)
+            self.assertRegex(lines[0], r"^running id=0 dir=\S+ cpus=3 elapsed=\d+s est=1s(?: over)? cmd=.+")
+            self.assertRegex(lines[1], r"^queued id=1 dir=\S+ cpus=all\(4\) waited=\d+s est=2m cmd=.+")
+            self.assertRegex(lines[2], r"^queued id=2 dir=\S+ cpus=1 waited=\d+s cmd=.+")
+            self.assertLessEqual(len(lines[0].split(" cmd=", 1)[1]), 80)
+            eventually(lambda: " over " in self.listing(q)[0])
             self.assertIsNone(p.poll(), "estimate must never stop the job")
             artifact("ls-over.txt", ("\n".join(self.listing(q)) + "\n").encode())
             self.assertEqual(q.call("kill", "1"), (0, b"", b""))
@@ -841,7 +845,7 @@ class VisibilityOnlyTests(unittest.TestCase):
             q.pids("watch-job")
             waiting = q.start("watch-wait")
             q.wait_rows(2)
-            eventually(lambda: " over " in self.listing(q)[1])
+            eventually(lambda: " over " in self.listing(q)[0])
             for method in ("q", "ctrl-c"):
                 master, slave = pty.openpty()
                 fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
@@ -1068,7 +1072,7 @@ class ReviewFixTests(unittest.TestCase):
                     self.assertEqual(following.wait(timeout=6), 0)
                     out, err = listing.communicate(timeout=3)
                     self.assertEqual((listing.returncode, err), (0, b""))
-                    self.assertTrue(out.startswith(b"cpus "))
+                    self.assertRegex(out, rb"^(?:(?:running|queued) id=\d+ .*\n)*$")
                     self.assertEqual(bad.recv(1), b"")
 
     def test_stalled_snapshot_reader_times_out_without_disconnect(self):
@@ -1086,7 +1090,7 @@ class ReviewFixTests(unittest.TestCase):
                 listing = q.popen("ls")
                 out, err = listing.communicate(timeout=7)
                 self.assertEqual((listing.returncode, err), (0, b""))
-                self.assertTrue(out.startswith(b"cpus "))
+                self.assertRegex(out, rb"^(?:(?:running|queued) id=\d+ .*\n)*$")
                 eventually(lambda: all(p.poll() == 0 for p in waiting), 8)
 
     def test_blocked_ls_stdout_does_not_hold_server(self):
