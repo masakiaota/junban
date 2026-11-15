@@ -18,6 +18,8 @@ Unreleased (behaviour changes for scripts):
    stops all jobs with a tag. The protocol version is now 734, so a running
    older server must be stopped with junban shutdown (which still works
    across versions) after upgrading. (#6)
+ - junban run --detach queues the job, prints only its ID and returns. The
+   job's output goes to <queue dir>/logs/ID.log, shown as log= in ls. (#2)
 
 ## Features to be implemented
 

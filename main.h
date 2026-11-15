@@ -12,7 +12,7 @@ enum
 
 /* Retired message numbers and fields are reserved to preserve the 40-byte
  * frame. No retired request has a handler. Version 734 adds the job tag
- * to the NEWJOB payload and to Job_view. */
+ * and the detached job's log path to the NEWJOB payload and to Job_view. */
 enum msg_types
 {
     KILL_SERVER,
@@ -83,6 +83,8 @@ struct Command_line {
     char **tags;
     int num_tags;
     char *tag; /* The tag of a new job, or NULL. */
+    int detach;
+    char *log_prefix; /* Log directory of a detached job, ending in '/'. */
 };
 
 enum Process_type {
@@ -113,7 +115,7 @@ struct msg
     {
         struct {
             int command_size;
-            int reserved_store_output;
+            int log_size;
             int reserved_should_keep_finished;
             int label_size;
             int tag_size;
@@ -155,6 +157,7 @@ struct Job
     int pid;
     char *label;
     char *tag;
+    char *log;
     int num_slots;
     int cpus_unspecified;
     int kill_requested;
@@ -174,6 +177,7 @@ struct Job_view {
     unsigned long long estimate;
     char label[128];
     char tag[64];
+    char log[512];
     char command[81];
 };
 
@@ -214,6 +218,8 @@ void c_send_runjob_ok(int pid);
 void c_shutdown_server();
 void c_kill_job();
 int c_kill_tag(void);
+char *c_log_prefix(void);
+void c_detach(void);
 void c_get_max_slots();
 
 /* jobs.c */

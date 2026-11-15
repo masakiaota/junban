@@ -854,6 +854,60 @@ class VisibilityOnlyTests(unittest.TestCase):
                 q.release(name)
                 self.assertEqual(p.wait(timeout=3), 0)
 
+    def test_detach(self):
+        with Queue(2) as q:
+            blocker = q.start("blocker", 1)
+            q.pids("blocker")
+            started = time.monotonic()
+            p = q.popen("run", "--detach", "-c", "1", "--tag", "d", PY, "-c",
+                        "import sys, time; print('OUT', flush=True); "
+                        "print('ERR', file=sys.stderr, flush=True); "
+                        "time.sleep(0.5); sys.exit(3)")
+            # The caller's pipes reach EOF at once although the job runs on.
+            out, err = p.communicate(timeout=3)
+            self.assertLess(time.monotonic() - started, 2)
+            self.assertEqual((p.returncode, out), (0, b"1\n"))
+            log = (q.path / "logs" / "1.log").resolve()
+            self.assertEqual(err.decode(), "junban: id=1 log=%s\n" % log)
+            self.assertEqual(log.stat().st_mode & 0o777, 0o600)
+            self.assertEqual((q.path / "logs").stat().st_mode & 0o777, 0o700)
+            line = eventually(lambda: q.call("ls", "-a", "--id", "1")[1].decode())
+            self.assertIn(" tag=d ", line)
+            self.assertIn(" log=%s cmd=" % log, line)
+            eventually(lambda: "exit=3" in q.call("ls", "-a", "--id", "1")[1].decode())
+            self.assertEqual(log.read_text(), "OUT\nERR\n")
+            # A detached job waits for its turn like any other job, silently.
+            p = q.popen("run", "--detach", PY, WORKER, "hold", "queued.pids", "queued.release")
+            out, err = p.communicate(timeout=3)
+            self.assertEqual((p.returncode, out), (0, b"2\n"))
+            self.assertEqual(q.rows(), [(0, "running"), (2, "queued")])
+            q.release("blocker")
+            self.assertEqual(blocker.wait(timeout=3), 0)
+            q.pids("queued")
+            self.assertEqual(q.rows(), [(2, "running")])
+            q.release("queued")
+            eventually(lambda: "exit=0" in q.call("ls", "-a", "--id", "2")[1].decode())
+            self.assertEqual((q.path / "logs" / "2.log").read_bytes(), b"")
+            # Killing a queued detached job removes it.
+            blocker = q.start("blocker2", 1)
+            q.pids("blocker2")
+            self.assertEqual(q.call("run", "--detach", "true")[:2], (0, b"4\n"))
+            self.assertEqual(q.call("kill", "4"), (0, b"", b""))
+            eventually(lambda: " killed " in q.call("ls", "-a", "--id", "4")[1].decode())
+            q.release("blocker2")
+            self.assertEqual(blocker.wait(timeout=3), 0)
+            # Errors before queuing still go to the caller.
+            self.own_failure(q.call("run", "--detach", "--detach", "true"))
+            self.own_failure(q.call("run", "--detach"))
+            self.own_failure(q.call("run", "--detach", "-c", "3", "true"), "CPUs")
+            (q.path / "sub").mkdir()
+            env = dict(q.env, JUNBAN_SOCKET="../s")
+            code, out, err = q.call("run", "--detach", "-c", "1", "pwd", cwd=q.path / "sub", env=env)
+            self.assertEqual((code, out), (0, b"5\n"))
+            eventually(lambda: "exit=0" in q.call("ls", "-a", "--id", "5")[1].decode())
+            self.assertEqual((q.path / "logs" / "5.log").read_text().strip(),
+                             str((q.path / "sub").resolve()))
+
     def test_estimate_parsing_and_units(self):
         with Queue() as q:
             for value in ("", "1", "s", "0s", "-1m", "+1s", "1.5h", "1ms", "1w",

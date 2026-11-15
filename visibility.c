@@ -69,6 +69,7 @@ void job_view(const struct Job *job, struct Job_view *view)
         view->elapsed = (job->finished_at ? job->finished_at : now) - job->started_at;
     safe_text(view->label, sizeof(view->label), job->label, 1);
     if (job->tag) safe_text(view->tag, sizeof(view->tag), job->tag, 1);
+    if (job->log) safe_text(view->log, sizeof(view->log), job->log, 1);
     safe_text(view->command, sizeof(view->command), job->command, 0);
 }
 
@@ -179,6 +180,7 @@ int print_snapshot(const struct Snapshot *snapshot)
             view_status(v, status, sizeof(status));
             printf(" %s", status);
         }
+        if (v->log[0]) printf(" log=%s", v->log);
         printf(" cmd=%s\n", v->command);
         ++printed;
     }

@@ -48,6 +48,17 @@ junban: id=1 started after 1s
 
 These messages go to standard error. Standard output carries only the command's own output.
 
+### Run a job in the background
+
+`junban run` returns when the job ends. To run several jobs in parallel, use `--detach`. It puts the job in the queue, prints only the job ID on standard output, and returns at once:
+
+```console
+$ id=$(junban run --detach -c 8 python train.py)
+junban: id=63 log=/Users/me/Library/Caches/junban/logs/63.log
+```
+
+The job then waits for its turn and runs as usual. Its standard output and standard error go to the file `logs/ID.log` in the queue directory (`~/Library/Caches/junban` on macOS; `$XDG_RUNTIME_DIR/junban` or `~/.cache/junban` on Ubuntu). The path is also shown as `log=` in `junban ls`. Its standard input is `/dev/null`. When it has finished, `junban ls -a --id 63` shows how it ended. Job IDs start again from 0 when the junban server restarts, and a new job then overwrites an old log with the same ID.
+
 ### Say how long it will take
 
 You can tell junban how long you expect a job to take with `--estimate`. Write the time with a unit: `90s`, `30m`, `2h`, `1d`.

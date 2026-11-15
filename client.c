@@ -17,6 +17,9 @@
 #include <math.h>
 #include <poll.h>
 #include <limits.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/resource.h>
 #include "main.h"
 
 static void c_end_of_job(const struct Result *res);
@@ -73,6 +76,7 @@ void c_new_job()
     else
         m.u.newjob.label_size = 0;
     m.u.newjob.tag_size = command_line.tag ? strlen(command_line.tag) + 1 : 0;
+    m.u.newjob.log_size = command_line.log_prefix ? strlen(command_line.log_prefix) + 1 : 0;
     m.u.newjob.num_slots = command_line.num_slots;
 
     /* Send the message */
@@ -91,6 +95,9 @@ void c_new_job()
 
     /* Send the tag */
     send_bytes(server_socket, command_line.tag, m.u.newjob.tag_size);
+
+    /* Send the log directory */
+    send_bytes(server_socket, command_line.log_prefix, m.u.newjob.log_size);
 
     free(new_command);
 }
@@ -160,6 +167,7 @@ int c_wait_server_commands()
         if (m.type == JOB_REMOVED)
             error("job removed from queue");
         if (m.type == LIST_LINE) {
+            /* A detached job's log holds only the command's output. */
             char *line;
             if (m.u.size < 1 || m.u.size > 4096) error("invalid queue notification");
             line = malloc((size_t)m.u.size);
@@ -167,11 +175,12 @@ int c_wait_server_commands()
             if (recv_bytes(server_socket, line, m.u.size) != m.u.size)
                 error("queue disconnected while notifying");
             line[m.u.size - 1] = 0;
-            fprintf(stderr, "junban: %s", line);
+            if (!command_line.detach) fprintf(stderr, "junban: %s", line);
             free(line);
             continue;
         }
         if (m.type == NOTICE_END) {
+            if (command_line.detach) continue;
             waited = 1;
             next_notice = monotime() + interval;
             continue;
@@ -277,6 +286,61 @@ int c_kill_tag(void)
     }
     free(snapshot.jobs);
     return killed;
+}
+
+/* Detached logs live next to the queue socket: <socket dir>/logs/ID.log. */
+char *c_log_prefix(void)
+{
+    char *path, *slash, *dir, *prefix;
+    create_socket_path(&path);
+    slash = strrchr(path, '/');
+    if (slash) {
+        slash[slash == path] = '\0';
+        dir = realpath(path, NULL);
+    } else dir = realpath(".", NULL);
+    free(path);
+    if (!dir) error("cannot find queue directory: %s", strerror(errno));
+    prefix = malloc(strlen(dir) + sizeof("/logs/"));
+    if (!prefix) error("out of memory");
+    sprintf(prefix, "%s/logs", dir);
+    free(dir);
+    if (mkdir(prefix, 0700) < 0 && errno != EEXIST)
+        error("cannot create log directory %s: %s", prefix, strerror(errno));
+    strcat(prefix, "/");
+    return prefix;
+}
+
+/* Print the job ID and leave the job running in the background, its output
+ * going to the log. The child keeps the queue connection and runs the job. */
+void c_detach(void)
+{
+    char *log = malloc(strlen(command_line.log_prefix) + 16);
+    int fd, nullfd, pid;
+    struct rlimit lim;
+    if (!log) error("out of memory");
+    sprintf(log, "%s%d.log", command_line.log_prefix, command_line.jobid);
+    fd = open(log, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0) error("cannot open job log %s: %s", log, strerror(errno));
+    nullfd = open("/dev/null", O_RDONLY);
+    if (nullfd < 0) error("cannot open /dev/null: %s", strerror(errno));
+    fflush(NULL);
+    pid = fork();
+    if (pid < 0) error("cannot detach: %s", strerror(errno));
+    if (pid > 0) {
+        printf("%d\n", command_line.jobid);
+        fprintf(stderr, "junban: id=%d log=%s\n", command_line.jobid, log);
+        exit(fflush(stdout) ? 125 : 0);
+    }
+    setsid();
+    dup2(nullfd, STDIN_FILENO);
+    dup2(fd, STDOUT_FILENO);
+    dup2(fd, STDERR_FILENO);
+    /* Hold none of the caller's pipes, or a caller reading them to EOF
+     * would wait for the job. */
+    if (getrlimit(RLIMIT_NOFILE, &lim) == 0)
+        for (int i = 3; (rlim_t)i < lim.rlim_cur && i < 4096; ++i)
+            if (i != server_socket) close(i);
+    free(log);
 }
 
 void c_get_max_slots()

@@ -342,6 +342,7 @@ static enum Break
                 m.u.newjob.num_slots < 0 ||
                 m.u.newjob.label_size < 0 || m.u.newjob.label_size > 4096 ||
                 m.u.newjob.tag_size < 0 || m.u.newjob.tag_size > 64 ||
+                m.u.newjob.log_size < 0 || m.u.newjob.log_size > 4096 ||
                 m.u.newjob.num_slots > max_slots)
                 return CLOSE;
             client_cs[index].jobid = s_newjob(s, &m);

@@ -18,7 +18,7 @@ int server_socket = -1;
 
 static void usage(void)
 {
-    error("usage: run [-c N | --cpus N] [--estimate DUR] [--tag TAG] [--] command [args...]; ls [-a] [--id N]... [--dir NAME]... [--tag TAG]... | ls --summary; watch; kill ID | kill --tag TAG; shutdown; help; version");
+    error("usage: run [-c N | --cpus N] [--estimate DUR] [--tag TAG] [--detach] [--] command [args...]; ls [-a] [--id N]... [--dir NAME]... [--tag TAG]... | ls --summary; watch; kill ID | kill --tag TAG; shutdown; help; version");
 }
 
 static unsigned long long duration(const char *s)
@@ -93,10 +93,12 @@ int main(int argc, char **argv)
     if (!strcmp(argv[1], "help") || !strcmp(argv[1], "--help")) {
         if (argc != 2) usage();
         puts("Usage:");
-        puts("  junban run [-c N] [--estimate DUR] [--tag TAG] [--] COMMAND [ARGS...]");
+        puts("  junban run [-c N] [--estimate DUR] [--tag TAG] [--detach] [--] COMMAND [ARGS...]");
         puts("      Wait for a turn, then run COMMAND as if it were run directly.");
         puts("      -c N, --cpus N   CPUs the job uses. Without it, the job takes all CPUs and runs alone.");
         puts("      --estimate DUR   Expected duration: 90s, 30m, 2h, 1d. Shown to others. Never a timeout.");
+        puts("      --detach         Queue the job, print only its ID, and return at once. The job's");
+        puts("                       stdout and stderr go to the file shown as log= in ls.");
         puts("      --tag TAG        Label the job as yours. Default: $JUNBAN_TAG. Characters: A-Z a-z 0-9 . _ : @ + -");
         puts("  junban ls [-a] [--id N]... [--dir NAME]... [--tag TAG]...");
         puts("      List running and queued jobs, one per line. -a adds the last 20 finished jobs.");
@@ -113,6 +115,7 @@ int main(int argc, char **argv)
         puts("  running|queued|done    Each line starts with the job's state.");
         puts("  id, dir, cmd           Job ID, directory it was started from, command.");
         puts("  tag                    The job's tag, shown only when it has one.");
+        puts("  log                    Output file of a --detach job: <queue dir>/logs/ID.log.");
         puts("  cpus=N, cpus=all(N)    all(N): -c was not given, so the job takes all N CPUs.");
         puts("  elapsed, waited, est   Time running, time in the queue, declared estimate.");
         puts("  over                   The job has run longer than its estimate.");
@@ -139,6 +142,12 @@ int main(int argc, char **argv)
         /* Parse only the prefix; never permute the command's arguments. */
         while (i < argc && argv[i][0] == '-') {
             if (!strcmp(argv[i], "--")) { ++i; break; }
+            if (!strcmp(argv[i], "--detach")) {
+                if (command_line.detach) usage();
+                command_line.detach = 1;
+                ++i;
+                continue;
+            }
             if (!strcmp(argv[i], "--tag")) {
                 if (tag || ++i == argc) usage();
                 command_line.tag = tag = checked_tag(argv[i++], "tag");
@@ -208,8 +217,10 @@ int main(int argc, char **argv)
         c_get_max_slots();
         if (command_line.num_slots > command_line.max_slots)
             error("requested CPUs exceed queue total (%d)", command_line.max_slots);
+        if (command_line.detach) command_line.log_prefix = c_log_prefix();
         c_new_job();
         command_line.jobid = c_wait_newjob_ok();
+        if (command_line.detach) c_detach();
         status = c_wait_server_commands();
         break;
     case c_LIST: {
@@ -235,6 +246,7 @@ int main(int argc, char **argv)
     }
     close(server_socket);
     free(command_line.label);
+    free(command_line.log_prefix);
     free(command_line.ids);
     free(command_line.dirs);
     if (command_line.request == c_LIST) free(command_line.tags);

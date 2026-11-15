@@ -48,6 +48,17 @@ junban: id=1 started after 1s
 
 この表示は標準エラーに出ます。標準出力には、コマンド自身の出力だけが流れます。
 
+### バックグラウンドで実行する
+
+`junban run` は、ジョブが終わるまで戻りません。複数のジョブを並列に実行したいときは `--detach` を使います。ジョブを待ち行列に入れ、標準出力にジョブIDだけを出して、すぐに戻ります。
+
+```console
+$ id=$(junban run --detach -c 8 python train.py)
+junban: id=63 log=/Users/me/Library/Caches/junban/logs/63.log
+```
+
+ジョブはその後、順番を待って通常どおり実行されます。ジョブの標準出力と標準エラーは、待ち行列のディレクトリ（macOS では `~/Library/Caches/junban`、Ubuntu では `$XDG_RUNTIME_DIR/junban` か `~/.cache/junban`）の `logs/ID.log` に書かれます。このパスは `junban ls` にも `log=` として表示されます。標準入力は `/dev/null` です。終わったあとは、`junban ls -a --id 63` でどう終了したかを確認できます。junban のサーバーが再起動するとジョブIDは0から振り直され、同じIDの古いログは新しいジョブで上書きされます。
+
 ### かかる時間を伝える
 
 ジョブにかかる時間の見込みを `--estimate` で伝えられます。`90s`、`30m`、`2h`、`1d` のように単位を付けて書きます。

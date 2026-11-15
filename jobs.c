@@ -216,6 +216,7 @@ int s_newjob(int s, struct msg *m)
     p->should_keep_finished = p->state != HOLDING_CLIENT;
     p->label = 0;
     p->tag = 0;
+    p->log = 0;
 
     if (recv_bytes(s, (char *)&p->estimate, sizeof(p->estimate)) != (int)sizeof(p->estimate))
         goto disconnected;
@@ -257,6 +258,22 @@ int s_newjob(int s, struct msg *m)
         if (res != m->u.newjob.tag_size)
             goto disconnected;
         p->tag[m->u.newjob.tag_size - 1] = '\0';
+    }
+
+    /* load the log directory; the file is named after the job ID */
+    if (m->u.newjob.log_size > 0)
+    {
+        char *dir = malloc(m->u.newjob.log_size);
+        size_t size = m->u.newjob.log_size + 16;
+        if (dir == 0 || (p->log = malloc(size)) == 0)
+            error("Cannot allocate memory in s_newjob log_size(%i)",
+                    m->u.newjob.log_size);
+        res = recv_bytes(s, dir, m->u.newjob.log_size);
+        dir[m->u.newjob.log_size - 1] = '\0';
+        snprintf(p->log, size, "%s%d.log", dir, p->jobid);
+        free(dir);
+        if (res != m->u.newjob.log_size)
+            goto disconnected;
     }
 
     return p->jobid;
@@ -350,6 +367,7 @@ static void new_finished_job(struct Job *j)
         free(tmp->command);
         free(tmp->label);
         free(tmp->tag);
+        free(tmp->log);
         free(tmp);
     }
     p->next = j;
@@ -429,6 +447,7 @@ void job_finished(const struct Result *result, int jobid)
             free(p->command);
             free(p->label);
             free(p->tag);
+            free(p->log);
             free(p);
         }
     }
