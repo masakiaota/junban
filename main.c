@@ -11,6 +11,7 @@
 #include <limits.h>
 #include <errno.h>
 #include <sys/time.h>
+#include <fcntl.h>
 #include "main.h"
 
 struct Command_line command_line;
@@ -87,7 +88,7 @@ static int number(const char *s, int minimum)
 
 int main(int argc, char **argv)
 {
-    int i = 2, status = 0;
+    int i = 2, status = 0, fd = -1;
     process_type = CLIENT;
     if (argc < 2) usage();
     if (!strcmp(argv[1], "help") || !strcmp(argv[1], "--help")) {
@@ -241,6 +242,12 @@ int main(int argc, char **argv)
 
     ignore_sigpipe();
     unblock_sigint_and_install_handler();
+    /* A detached job replaces 0-2, so nothing junban opens may land there
+     * when the caller closed them. Reopened read-only, a closed stdout
+     * still fails to take the job ID. */
+    if (command_line.detach)
+        while ((fd = open("/dev/null", O_RDONLY)) >= 0 && fd <= STDERR_FILENO) {}
+    if (fd > STDERR_FILENO) close(fd);
     ensure_server_up();
     /* KILL_SERVER keeps its message number, so shutdown also stops a server
      * of another protocol version, as needed when upgrading junban. */
@@ -281,10 +288,5 @@ int main(int argc, char **argv)
     }
     close(server_socket);
     free(command_line.label);
-    free(command_line.log_prefix);
-    free(command_line.ids);
-    free(command_line.dirs);
-    if (command_line.request == c_LIST || command_line.request == c_WAIT)
-        free(command_line.tags);
     return status;
 }

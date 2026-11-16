@@ -356,29 +356,11 @@ void c_detach(void)
     struct rlimit lim;
     if (!log) error("out of memory");
     sprintf(log, "%s%d.log", command_line.log_prefix, command_line.jobid);
-    /* Keep the queue connection off 0-2, which are replaced below; the
-     * caller may have started junban with stdin, stdout or stderr closed. */
-    if (server_socket <= STDERR_FILENO) {
-        int moved = fcntl(server_socket, F_DUPFD_CLOEXEC, STDERR_FILENO + 1);
-        if (moved < 0) error("cannot keep queue connection: %s", strerror(errno));
-        close(server_socket);
-        server_socket = moved;
-    }
+    /* main() keeps 0-2 open, so these land above them and survive dup2. */
     fd = open(log, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0600);
     if (fd < 0) error("cannot open job log %s: %s", log, strerror(errno));
     nullfd = open("/dev/null", O_RDONLY);
     if (nullfd < 0) error("cannot open /dev/null: %s", strerror(errno));
-    /* dup2 onto 0-2 below must not overwrite one of these. */
-    if (fd <= STDERR_FILENO || nullfd <= STDERR_FILENO) {
-        /* Close the originals too: a closed stdout or stderr reopened as
-         * the log would get the ID and diagnostics meant for the caller. */
-        int low_fd = fd, low_null = nullfd;
-        if (fd <= STDERR_FILENO) fd = fcntl(fd, F_DUPFD, STDERR_FILENO + 1);
-        if (nullfd <= STDERR_FILENO) nullfd = fcntl(nullfd, F_DUPFD, STDERR_FILENO + 1);
-        if (fd < 0 || nullfd < 0) error("cannot open job log: %s", strerror(errno));
-        if (low_fd <= STDERR_FILENO) close(low_fd);
-        if (low_null <= STDERR_FILENO) close(low_null);
-    }
     fflush(NULL);
     pid = fork();
     if (pid < 0) error("cannot detach: %s", strerror(errno));
@@ -416,12 +398,12 @@ static void wait_io_timeout(void)
     double left;
     struct timeval timeout;
     if (!wait_deadline) return;
-    /* A short grace lets a responsive server answer the last check. */
+    /* A short grace lets a responsive server answer the last check, and
+     * keeps the timeout above zero, which would mean no timeout. */
     left = wait_deadline - monotime();
     left = (left > 0 ? left : 0) + 0.1;
     timeout.tv_sec = (time_t)left;
-    timeout.tv_usec = (suseconds_t)((left - (double)timeout.tv_sec) * 1e6) + 1;
-    if (timeout.tv_usec >= 1000000) { ++timeout.tv_sec; timeout.tv_usec -= 1000000; }
+    timeout.tv_usec = (suseconds_t)((left - (double)timeout.tv_sec) * 1e6);
     setsockopt(server_socket, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
     setsockopt(server_socket, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
 }

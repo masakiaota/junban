@@ -192,10 +192,22 @@ static struct Job * newjobptr()
 }
 
 /* Returns job id or -1 on error */
+/* Read a NUL-terminated string of size bytes into a new buffer, or leave
+ * *dst NULL for size 0. Returns 0 if the client went away. */
+static int recv_string(int s, int size, char **dst)
+{
+    if (size <= 0) return 1;
+    if (!(*dst = malloc((size_t)size)))
+        error("Cannot allocate memory in s_newjob (%i)", size);
+    if (recv_bytes(s, *dst, size) != size) return 0;
+    (*dst)[size - 1] = '\0';
+    return 1;
+}
+
 int s_newjob(int s, struct msg *m)
 {
     struct Job *p;
-    int res;
+    char *log_dir = NULL;
 
     p = newjobptr();
 
@@ -223,63 +235,23 @@ int s_newjob(int s, struct msg *m)
     if (recv_bytes(s, (char *)&p->estimate, sizeof(p->estimate)) != (int)sizeof(p->estimate))
         goto disconnected;
 
-    /* load the command */
-    p->command = malloc(m->u.newjob.command_size);
-    if (p->command == 0)
-        error("Cannot allocate memory in s_newjob command_size (%i)",
-                m->u.newjob.command_size);
-    res = recv_bytes(s, p->command, m->u.newjob.command_size);
-    if (res != m->u.newjob.command_size)
+    if (!recv_string(s, m->u.newjob.command_size, &p->command) ||
+        !recv_string(s, m->u.newjob.label_size, &p->label) ||
+        !recv_string(s, m->u.newjob.tag_size, &p->tag) ||
+        !recv_string(s, m->u.newjob.log_size, &log_dir))
         goto disconnected;
-    p->command[m->u.newjob.command_size - 1] = '\0';
 
-    /* load the label */
-    p->label = 0;
-    if (m->u.newjob.label_size > 0)
-    {
-        char *ptr;
-        ptr = (char *) malloc(m->u.newjob.label_size);
-        if (ptr == 0)
-            error("Cannot allocate memory in s_newjob label_size(%i)",
-                    m->u.newjob.label_size);
-        p->label = ptr;
-        res = recv_bytes(s, ptr, m->u.newjob.label_size);
-        if (res != m->u.newjob.label_size)
-            goto disconnected;
-        ptr[m->u.newjob.label_size - 1] = '\0';
-    }
-
-    /* load the tag */
-    if (m->u.newjob.tag_size > 0)
-    {
-        p->tag = malloc(m->u.newjob.tag_size);
-        if (p->tag == 0)
-            error("Cannot allocate memory in s_newjob tag_size(%i)",
-                    m->u.newjob.tag_size);
-        res = recv_bytes(s, p->tag, m->u.newjob.tag_size);
-        if (res != m->u.newjob.tag_size)
-            goto disconnected;
-        p->tag[m->u.newjob.tag_size - 1] = '\0';
-    }
-
-    /* load the log directory; the file is named after the job ID */
-    if (m->u.newjob.log_size > 0)
-    {
-        char *dir = malloc(m->u.newjob.log_size);
-        size_t size = m->u.newjob.log_size + 16;
-        if (dir == 0 || (p->log = malloc(size)) == 0)
-            error("Cannot allocate memory in s_newjob log_size(%i)",
-                    m->u.newjob.log_size);
-        res = recv_bytes(s, dir, m->u.newjob.log_size);
-        dir[m->u.newjob.log_size - 1] = '\0';
-        snprintf(p->log, size, "%s%d.log", dir, p->jobid);
-        free(dir);
-        if (res != m->u.newjob.log_size)
-            goto disconnected;
+    /* The client sends the log directory; the file is named after the job ID. */
+    if (log_dir) {
+        size_t size = strlen(log_dir) + 16;
+        if (!(p->log = malloc(size))) error("Cannot allocate memory in s_newjob");
+        snprintf(p->log, size, "%s%d.log", log_dir, p->jobid);
+        free(log_dir);
     }
 
     return p->jobid;
 disconnected:
+    free(log_dir);
     {
         struct Result result = {0};
         p->should_keep_finished = 0;
