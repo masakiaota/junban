@@ -48,6 +48,35 @@ junban: id=1 started after 1s
 
 この表示は標準エラーに出ます。標準出力には、コマンド自身の出力だけが流れます。
 
+### バックグラウンドで実行する
+
+`junban run` は、ジョブが終わるまで戻りません。複数のジョブを並列に実行したいときは `--detach` を使います。ジョブを待ち行列に入れ、標準出力にジョブIDだけを出して、すぐに戻ります。
+
+```console
+$ id=$(junban run --detach -c 8 python train.py)
+junban: id=63 log=/Users/me/Library/Caches/junban/queue.sock.logs/63.log
+```
+
+ジョブはその後、順番を待って通常どおり実行されます。ジョブの標準出力と標準エラーは、待ち行列のディレクトリ（macOS では `~/Library/Caches/junban`、Ubuntu では `$XDG_RUNTIME_DIR/junban` か `~/.cache/junban`）の `queue.sock.logs/ID.log` に書かれます。このパスは `junban ls` にも `log=` として表示されます。標準入力は `/dev/null` です。終了を待つには、次に説明する `junban wait` を使います。junban のサーバーが再起動するとジョブIDは0から振り直され、同じIDの古いログは新しいジョブで上書きされます。
+
+### ジョブの終了を待つ
+
+`junban wait` は、指定したジョブがすべて終わるまで待ちます。終了コードは各ジョブの終了コードの最大値なので、すべて成功すれば 0 です。
+
+```console
+$ a=$(junban run --detach -c 4 python train.py --fold 0)
+$ b=$(junban run --detach -c 4 python train.py --fold 1)
+$ junban wait "$a" "$b"
+```
+
+- すでに終わったジョブは、その結果からすぐに判定します。junban は、終わったジョブのうち最後の1000個の結果を覚えています。
+- `--timeout DUR` を付けると、`DUR`（`90s`、`30m`、`2h`、`1d`）が過ぎたところで待つのをやめ、終了コード 124 を返します。ジョブは動き続けます。
+- `--tag TAG` を付けると、待ち始めた時点で実行中・待機中のそのタグのジョブと、待っている間に投入されたそのタグのジョブを待ちます。待ち始める前に終わっていたジョブは含みません。ジョブごとの結果を確実に知りたいときは、IDを指定して待ちます。
+- 既定では何も出力しません。`-v` を付けると、ジョブが終わるたびに標準出力に1行出します（例: `finished id=63 exit=0 elapsed=4m12s`）。
+- junban 自身のエラー（存在しないジョブID、待ち行列に接続できない、など）のときは 125 を返します。
+
+ジョブを待つときは `junban wait` を使い、`junban ls` を見張るループは書かないでください。一覧全体を見張ると、ほかのエージェントのジョブまで待ってしまいます。
+
 ### かかる時間を伝える
 
 ジョブにかかる時間の見込みを `--estimate` で伝えられます。`90s`、`30m`、`2h`、`1d` のように単位を付けて書きます。
@@ -58,18 +87,46 @@ $ junban run -c 8 --estimate 2h python train.py
 
 見込みは、待っているほかのジョブに表示されます。見込みを過ぎても、ジョブが打ち切られることはありません。
 
+### ジョブにタグを付ける
+
+`--tag` でジョブにタグを付けると、自分のジョブをまとめて扱えます。環境変数 `JUNBAN_TAG` を設定しておくと、`--tag` を省略してもそのタグが付きます。エージェントのセッションごとに一度設定しておけば、そのエージェントのジョブが自然にまとまります。タグには `A-Z a-z 0-9 . _ : @ + -` の文字を1〜63文字使えます。
+
+```console
+$ export JUNBAN_TAG=agent-1
+$ junban run -c 4 python train.py
+$ junban ls --tag agent-1
+running id=5 dir=demo tag=agent-1 cpus=4 elapsed=10s cmd=python train.py
+$ junban kill --tag agent-1
+```
+
+`junban kill --tag TAG` は、そのタグが付いた実行中・待機中のジョブをすべて止めます。該当するジョブがないときは終了コード 1 を返します。
+
 ### 状況を確認する
 
-`junban ls` で、実行中のジョブと待っているジョブを確認できます。
+`junban ls` で、実行中のジョブと待っているジョブを1行に1つずつ確認できます。
 
 ```console
 $ junban ls
-cpus 1/4 running 1 queued 1
 running id=0 dir=demo cpus=1 elapsed=1s est=30m cmd=sleep 30
 queued id=1 dir=demo cpus=all(4) waited=1s est=5m cmd=sh -c echo evaluated
 ```
 
-`dir` は、ジョブを投入したディレクトリの名前です。`cpus=all(4)` は、`-c` を省略したジョブです。見込みの時間を過ぎたジョブには `over` と表示されます。終わったジョブも見たいときは `junban ls -a` を使います。
+`dir` は、ジョブを投入したディレクトリの名前です。`cpus=all(4)` は、`-c` を省略したジョブです。見込みの時間を過ぎたジョブには `over` と表示されます。終わったジョブも見たいときは `junban ls -a` を使います。終わったジョブの行は `done` で始まります。
+
+`junban ls` の標準出力には、ジョブの行だけが出ます。どの行も、ジョブの状態（`running`、`queued`、`done`）で始まります。ジョブがないときは何も出力しません。終了コードは `grep` と同じく、ジョブを1件以上表示したときは 0、1件もなかったときは 1、junban 自身のエラーのときは 125 です。CPUの使用状況を見たいときは `junban ls --summary` を使います。
+
+```console
+$ junban ls --summary
+cpus 1/4 running 1 queued 1
+```
+
+一部のジョブだけを表示したいときは、ジョブIDを `--id N` で、ディレクトリ（`dir=` の名前）を `--dir NAME` で、タグを `--tag TAG` で指定します。どちらも繰り返し指定でき、互いに、また `-a` とも組み合わせられます。このときの終了コードは、指定したジョブが表示されたかどうかを表します。
+
+```console
+$ junban ls --id 63 --id 64
+running id=63 dir=demo cpus=8 elapsed=5m cmd=python train.py
+$ junban ls -a --dir demo
+```
 
 人間が見るときは `junban watch` が便利です。画面が2秒ごとに更新されます。`q` で終了します。
 
@@ -114,8 +171,14 @@ $ junban kill 0
 - 使用するCPU数を -c で正しく指定する。スレッドや子プロセスの分も含める。
 - 実行時間を測る評価は、-c を付けずに実行する。
 - かかる時間の見当がつくときは --estimate で伝える。
-- 待たされたときは junban ls で状況を確認する。ほかのエージェントのジョブは止めない。
+- junban run を前景で実行すれば、ジョブの終了まで戻らない。並列にするときは、
+  id=$(junban run --detach ...) で受け取ったIDを junban wait に渡して待つ。
+  junban wait の終了コードは、各ジョブの終了コードの最大値である。
+- junban ls の出力を grep して待つループは書かない。
+- ほかのエージェントのジョブは止めない。
 ```
+
+エージェントのセッションごとに `JUNBAN_TAG` を設定する場合（例: `export JUNBAN_TAG=agent-1`）は、「自分のジョブをまとめて止めるときは junban kill --tag "$JUNBAN_TAG" を使う。」のような1行を加えてもよいです。
 
 ## 制限
 

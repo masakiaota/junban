@@ -23,6 +23,7 @@ import sys
 import tempfile
 import termios
 import time
+import unicodedata
 import unittest
 
 REPO = Path(__file__).resolve().parents[1]
@@ -37,6 +38,7 @@ ROOT.mkdir(parents=True, exist_ok=True)
 MESSAGE = struct.Struct("=10i")
 _enum = (REPO / "main.h").read_text().split("enum msg_types")[1].split("{")[1].split("}")[0]
 TYPES = {name.strip(): i for i, name in enumerate(_enum.split(","))}
+PROTOCOL = int(re.search(r"PROTOCOL_VERSION=(\d+)", (REPO / "main.h").read_text()).group(1))
 
 
 def send_message(sock, kind, *values):
@@ -60,7 +62,7 @@ def connect_raw(q):
     s.settimeout(3)
     s.connect(os.path.relpath(q.path / "s"))
     send_message(s, "GET_VERSION")
-    assert receive_message(s)[:2] == (TYPES["VERSION"], 733)
+    assert receive_message(s)[:2] == (TYPES["VERSION"], PROTOCOL)
     return s
 
 
@@ -118,7 +120,7 @@ class Queue:
 
     def rows(self):
         code, out, err = self.call("ls")
-        assert code == 0 and err == b"", (code, out, err)
+        assert code == (0 if out else 1) and err == b"", (code, out, err)
         rows = []
         for line in out.decode().splitlines():
             fields = line.split()
@@ -210,7 +212,7 @@ class QueueTests(unittest.TestCase):
     def test_transparency(self):
         with Queue() as q:
             server_env = dict(q.env, MARK="server", SERVER_ONLY="server")
-            self.assertEqual(q.call("ls", env=server_env)[0], 0)
+            self.assertEqual(q.call("ls", env=server_env)[0], 1)
             for name in ("a", "b"):
                 directory = q.path / name
                 directory.mkdir()
@@ -359,7 +361,7 @@ class QueueTests(unittest.TestCase):
         with Queue() as q:
             env = dict(q.env)
             env.pop("JUNBAN_SLOTS")
-            code, out, err = q.call("ls", env=env)
+            code, out, err = q.call("ls", "--summary", env=env)
             self.assertEqual((code, err), (0, b""))
             self.assertIn(("/%d " % os.cpu_count()).encode(), out)
         with Queue(4) as q:
@@ -492,13 +494,13 @@ class QueueTests(unittest.TestCase):
                 connection, _ = listener.accept()
                 with connection:
                     self.assertEqual(receive_message(connection)[0], TYPES["GET_VERSION"])
-                    send_message(connection, "VERSION", 733)
+                    send_message(connection, "VERSION", PROTOCOL)
                     self.assertEqual(receive_message(connection)[0], TYPES["GET_MAX_SLOTS"])
                     send_message(connection, "GET_MAX_SLOTS_OK", 4)
                     new = receive_message(connection)
                     self.assertEqual(new[0], TYPES["NEWJOB"])
                     self.assertEqual(connection.recv(8, socket.MSG_WAITALL), struct.pack("=Q", 0))
-                    remaining = new[1] + new[4] + new[5]  # command, label, env
+                    remaining = new[1] + new[4] + new[5]  # command, label, tag
                     while remaining:
                         remaining -= len(connection.recv(remaining))
                     send_message(connection, "NEWJOB_OK", 0)
@@ -513,6 +515,22 @@ class QueueTests(unittest.TestCase):
                     self.assertEqual(p.wait(timeout=3), -signal.SIGKILL)
                     eventually(lambda: not alive(pgid))
                     self.assertFalse((q.path / "never").exists())
+            finally:
+                listener.close()
+
+    def test_shutdown_skips_version_check(self):
+        # An older server must still be stoppable after upgrading the client.
+        with Queue() as q:
+            listener = socket.socket(socket.AF_UNIX)
+            listener.bind(os.path.relpath(q.path / "s"))
+            listener.listen(1)
+            try:
+                p = q.popen("shutdown")
+                connection, _ = listener.accept()
+                with connection:
+                    self.assertEqual(receive_message(connection)[0], TYPES["KILL_SERVER"])
+                self.assertEqual(p.communicate(timeout=3), (b"", b""))
+                self.assertEqual(p.returncode, 0)
             finally:
                 listener.close()
 
@@ -576,7 +594,7 @@ class QueueTests(unittest.TestCase):
             def limited_fds():
                 soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
                 resource.setrlimit(resource.RLIMIT_NOFILE, (64, hard))
-            self.assertEqual(q.call("ls", preexec_fn=limited_fds)[0], 0)
+            self.assertEqual(q.call("ls", preexec_fn=limited_fds)[0], 1)
             server = q.server()
             inode = (q.path / "s").stat().st_ino
             blocker = q.start("blocker", tree=True)
@@ -700,7 +718,7 @@ class VisibilityOnlyTests(unittest.TestCase):
 
     def listing(self, q, all=False):
         code, out, err = q.call("ls", *(["-a"] if all else []))
-        self.assertEqual((code, err), (0, b""))
+        self.assertEqual((code, err), (0 if out else 1, b""))
         self.assertNotIn(b"junban:", out)
         self.assertNotIn(b"\x1b", out)
         return out.decode().splitlines()
@@ -712,10 +730,410 @@ class VisibilityOnlyTests(unittest.TestCase):
                 self.assertEqual((code, err), (0, b""))
                 self.assertTrue(out)
                 self.assertNotIn(b"junban:", out)
-            self.assertEqual(self.listing(q), ["cpus 0/4 running 0 queued 0"])
+            self.assertEqual(q.call("ls"), (1, b"", b""))
+            self.assertEqual(q.call("ls", "-a"), (1, b"", b""))
+            # Agents read --help first: it must say how ls lines look and how to wait.
+            text = q.call("help")[1].decode()
+            for phrase in ("stdout has one line per job and nothing else",
+                           "STATE id=N dir=DIR [tag=TAG] cpus=C",
+                           "junban wait ID...", "Do not loop over the output of junban ls",
+                           "ls     0 if it listed a job, 1 if it listed none"):
+                self.assertIn(phrase, text)
+            self.assertLessEqual(max(map(len, text.splitlines())), 100)
+            self.assertEqual(q.call("version")[1], b"junban 0.1.1 (based on task-spooler 1.0.4)\n")
+            self.assertEqual(q.call("ls", "--summary"), (0, b"cpus 0/4 running 0 queued 0\n", b""))
+            for args in (["--summary", "-a"], ["-a", "-a"], ["--summary", "--summary"]):
+                self.own_failure(q.call("ls", *args))
             self.assertEqual(q.call("run", "sh", "-c", "printf OUT; printf ERR >&2"),
                              (0, b"OUT", b"ERR"))
             self.own_failure(q.call("ls", "--bad"))
+
+    def test_ls_exit_status(self):
+        with Queue(2) as q:
+            self.assertEqual(q.call("ls"), (1, b"", b""))
+            p = q.start("job", 1)
+            q.pids("job")
+            code, out, err = q.call("ls")
+            self.assertEqual((code, err), (0, b""))
+            self.assertTrue(out.startswith(b"running id=0 "))
+            q.release("job")
+            self.assertEqual(p.wait(timeout=3), 0)
+            eventually(lambda: q.call("ls")[0] == 1)
+            self.assertEqual(q.call("ls", "-a")[0], 0)
+            env = dict(q.env, JUNBAN_SOCKET="missing/s")
+            for args in (["ls"], ["ls", "-a"], ["ls", "--summary"]):
+                self.own_failure(q.call(*args, env=env))
+
+    def test_ls_filters(self):
+        with Queue(4) as q:
+            q.call("ls")
+            for name in ("alpha", "beta", "sp ace"):
+                (q.path / name).mkdir()
+            env = dict(q.env, JUNBAN_SOCKET="../s")
+            self.assertEqual(q.call("run", "true", cwd=q.path / "alpha", env=env), (0, b"", b""))
+            a = q.popen("run", "-c", "1", PY, WORKER, "hold", q.path / "a.pids",
+                        q.path / "a.release", cwd=q.path / "alpha", env=env)
+            q.pids("a")
+            b = q.popen("run", "-c", "1", PY, WORKER, "hold", q.path / "b.pids",
+                        q.path / "b.release", cwd=q.path / "beta", env=env)
+            q.pids("b")
+            c = q.popen("run", "-c", "1", PY, WORKER, "hold", q.path / "c.pids",
+                        q.path / "c.release", cwd=q.path / "sp ace", env=env)
+            q.pids("c")
+            def listed(*args):
+                code, out, err = q.call("ls", *args)
+                self.assertEqual((code, err), (0 if out else 1, b""), args)
+                return [int(line.split()[1][3:]) for line in out.decode().splitlines()]
+            self.assertEqual(listed(), [1, 2, 3])
+            self.assertEqual(listed("--id", "2"), [2])
+            self.assertEqual(listed("--id", "3", "--id", "1"), [1, 3])
+            self.assertEqual(listed("--id", "0"), [])
+            self.assertEqual(listed("--id", "0", "-a"), [0])
+            self.assertEqual(listed("--id", "99"), [])
+            self.assertEqual(listed("--dir", "alpha"), [1])
+            self.assertEqual(listed("--dir", "alpha", "-a"), [1, 0])
+            self.assertEqual(listed("--dir", "alpha", "--dir", "beta"), [1, 2])
+            self.assertEqual(listed("--dir", "sp%20ace"), [3])
+            self.assertEqual(listed("--dir", "sp ace"), [3])
+            self.assertEqual(listed("--dir", "alpha", "--id", "2"), [])
+            self.assertEqual(listed("--dir", "beta", "--id", "2"), [2])
+            self.assertEqual(listed("-a", "--dir", "alpha", "--id", "0"), [0])
+            self.assertEqual(q.call("ls", "--id", "2")[0], 0)
+            self.assertEqual(q.call("ls", "--id", "99")[0], 1)
+            for args in (["--id"], ["--id", "x"], ["--id", "-1"], ["--dir"], ["--dir", ""],
+                         ["--summary", "--id", "1"], ["--summary", "--dir", "alpha"]):
+                self.own_failure(q.call("ls", *args))
+            for name, p in (("a", a), ("b", b), ("c", c)):
+                q.release(name)
+                self.assertEqual(p.wait(timeout=3), 0)
+
+    def test_tags(self):
+        with Queue(4) as q:
+            def listed(*args):
+                code, out, err = q.call("ls", *args)
+                self.assertEqual((code, err), (0 if out else 1, b""), args)
+                return [(int(line.split()[1][3:]), re.search(r" tag=(\S+)", line) and
+                         re.search(r" tag=(\S+)", line).group(1))
+                        for line in out.decode().splitlines()]
+            def hold(name, *opts, env=None):
+                return q.popen("run", "-c", "1", *opts, PY, WORKER, "hold", name + ".pids",
+                               name + ".release", env=env or q.env)
+            agent = dict(q.env, JUNBAN_TAG="agent-1")
+            a = hold("a", env=agent)
+            q.pids("a")
+            b = hold("b", "--tag", "other", env=agent)
+            q.pids("b")
+            c = hold("c")
+            q.pids("c")
+            d = hold("d", "--tag", "agent-1")
+            q.pids("d")
+            e = q.popen("run", "--tag", "agent-1", PY, WORKER, "hold", "e.pids", "e.release")
+            eventually(lambda: len(listed()) == 5)
+            self.assertEqual(listed(), [(0, "agent-1"), (1, "other"), (2, None),
+                                        (3, "agent-1"), (4, "agent-1")])
+            self.assertRegex(q.call("ls", "--id", "0")[1].decode(),
+                             r"^running id=0 dir=\S+ tag=agent-1 cpus=1 elapsed=\d+s cmd=")
+            self.assertEqual(listed("--tag", "agent-1"), [(0, "agent-1"), (3, "agent-1"), (4, "agent-1")])
+            self.assertEqual(listed("--tag", "agent-1", "--tag", "other"),
+                             [(0, "agent-1"), (1, "other"), (3, "agent-1"), (4, "agent-1")])
+            self.assertEqual(listed("--tag", "agent-1", "--id", "1"), [])
+            self.assertEqual(listed("--tag", "nobody"), [])
+            # Killing by tag stops running jobs and removes queued ones, only for that tag.
+            self.assertEqual(q.call("kill", "--tag", "agent-1"), (0, b"", b""))
+            self.assertEqual(a.wait(timeout=3), 143)
+            self.assertEqual(d.wait(timeout=3), 143)
+            out, err = e.communicate(timeout=3)
+            self.own_failure((e.returncode, out, err), "removed")
+            eventually(lambda: listed() == [(1, "other"), (2, None)])
+            self.assertEqual(sorted(listed("-a", "--tag", "agent-1")),
+                             [(0, "agent-1"), (3, "agent-1"), (4, "agent-1")])
+            self.assertEqual(q.call("kill", "--tag", "agent-1"),
+                             (1, b"", b"junban: no running or queued job with tag agent-1\n"))
+            for args in (["run", "--tag", "", "true"], ["run", "--tag", "a b", "true"],
+                         ["run", "--tag", "x" * 64, "true"], ["run", "--tag"],
+                         ["run", "--tag", "a", "--tag", "b", "true"], ["ls", "--tag"],
+                         ["ls", "--tag", "a/b"], ["ls", "--summary", "--tag", "a"],
+                         ["kill", "--tag"], ["kill", "--tag", "a", "b"], ["kill", "--tag", "%"]):
+                self.own_failure(q.call(*args))
+            self.own_failure(q.call("run", "true", env=dict(q.env, JUNBAN_TAG="bad tag")), "JUNBAN_TAG")
+            self.assertEqual(q.call("run", "-c", "1", "true", env=dict(q.env, JUNBAN_TAG="")), (0, b"", b""))
+            self.assertEqual(q.call("run", "-c", "1", "--tag", "x" * 63, "true", env=agent), (0, b"", b""))
+            self.assertEqual(listed("-a", "--tag", "x" * 63)[0][1], "x" * 63)
+            self.assertEqual(listed("-a", "--id", "5"), [(5, None)])
+            for name, p in (("b", b), ("c", c)):
+                q.release(name)
+                self.assertEqual(p.wait(timeout=3), 0)
+
+    def test_detach(self):
+        with Queue(2) as q:
+            blocker = q.start("blocker", 1)
+            q.pids("blocker")
+            started = time.monotonic()
+            p = q.popen("run", "--detach", "-c", "1", "--tag", "d", PY, "-c",
+                        "import sys, time; print('OUT', flush=True); "
+                        "print('ERR', file=sys.stderr, flush=True); "
+                        "time.sleep(0.5); sys.exit(3)")
+            # The caller's pipes reach EOF at once although the job runs on.
+            out, err = p.communicate(timeout=3)
+            self.assertLess(time.monotonic() - started, 2)
+            self.assertEqual((p.returncode, out), (0, b"1\n"))
+            log = (q.path / "s.logs" / "1.log").resolve()
+            self.assertEqual(err.decode(), "junban: id=1 log=%s\n" % log)
+            self.assertEqual(log.stat().st_mode & 0o777, 0o600)
+            self.assertEqual((q.path / "s.logs").stat().st_mode & 0o777, 0o700)
+            line = eventually(lambda: q.call("ls", "-a", "--id", "1")[1].decode())
+            self.assertIn(" tag=d ", line)
+            self.assertIn(" log=%s cmd=" % log, line)
+            eventually(lambda: "exit=3" in q.call("ls", "-a", "--id", "1")[1].decode())
+            self.assertEqual(log.read_text(), "OUT\nERR\n")
+            # A detached job waits for its turn like any other job, silently.
+            p = q.popen("run", "--detach", PY, WORKER, "hold", "queued.pids", "queued.release")
+            out, err = p.communicate(timeout=3)
+            self.assertEqual((p.returncode, out), (0, b"2\n"))
+            self.assertEqual(q.rows(), [(0, "running"), (2, "queued")])
+            q.release("blocker")
+            self.assertEqual(blocker.wait(timeout=3), 0)
+            q.pids("queued")
+            self.assertEqual(q.rows(), [(2, "running")])
+            q.release("queued")
+            eventually(lambda: "exit=0" in q.call("ls", "-a", "--id", "2")[1].decode())
+            self.assertEqual((q.path / "s.logs" / "2.log").read_bytes(), b"")
+            # Killing a queued detached job removes it.
+            blocker = q.start("blocker2", 1)
+            q.pids("blocker2")
+            self.assertEqual(q.call("run", "--detach", "true")[:2], (0, b"4\n"))
+            self.assertEqual(q.call("kill", "4"), (0, b"", b""))
+            eventually(lambda: " killed " in q.call("ls", "-a", "--id", "4")[1].decode())
+            q.release("blocker2")
+            self.assertEqual(blocker.wait(timeout=3), 0)
+            # Errors before queuing still go to the caller.
+            self.own_failure(q.call("run", "--detach", "--detach", "true"))
+            self.own_failure(q.call("run", "--detach"))
+            self.own_failure(q.call("run", "--detach", "-c", "3", "true"), "CPUs")
+            (q.path / "sub").mkdir()
+            env = dict(q.env, JUNBAN_SOCKET="../s")
+            code, out, err = q.call("run", "--detach", "-c", "1", "pwd", cwd=q.path / "sub", env=env)
+            self.assertEqual((code, out), (0, b"5\n"))
+            eventually(lambda: "exit=0" in q.call("ls", "-a", "--id", "5")[1].decode())
+            self.assertEqual((q.path / "s.logs" / "5.log").read_text().strip(),
+                             str((q.path / "sub").resolve()))
+
+    def test_wait(self):
+        with Queue(2) as q:
+            def detach(*args):
+                code, out, err = q.call("run", "--detach", *args)
+                self.assertEqual(code, 0, err)
+                return out.decode().strip()
+            def hold(name, *opts):
+                return detach("-c", "1", *opts, PY, WORKER, "hold", name + ".pids", name + ".release")
+            done = detach("-c", "1", "sh", "-c", "exit 3")
+            eventually(lambda: "exit=3" in q.call("ls", "-a", "--id", done)[1].decode())
+            # Finished jobs are judged at once, with or without a timeout.
+            self.assertEqual(q.call("wait", done), (3, b"", b""))
+            self.assertEqual(q.call("wait", "--timeout", "1s", done), (3, b"", b""))
+            code, out, err = q.call("wait", "-v", done)
+            self.assertEqual((code, err), (3, b""))
+            self.assertRegex(out.decode(), r"^finished id=0 exit=3 elapsed=\d+s\n$")
+            # A running job and a queued job behind it.
+            running = hold("running")
+            q.pids("running")
+            queued = detach("sh", "-c", "exit 5")
+            self.assertEqual(q.rows(), [(1, "running"), (2, "queued")])
+            for ids in ([running], [queued], [running, queued, done]):
+                started = time.monotonic()
+                self.assertEqual(q.call("wait", "--timeout", "1s", *ids),
+                                 (124, b"", b"junban: timed out with %d of %d jobs unfinished\n"
+                                  % (len(set(ids) - {done}), len(ids))))
+                self.assertGreaterEqual(time.monotonic() - started, 0.9)
+            waiter = q.popen("wait", "-v", running, queued, done)
+            timed = q.popen("wait", "--timeout", "1h", queued)
+            time.sleep(0.5)
+            self.assertIsNone(waiter.poll())
+            self.assertIsNone(timed.poll())
+            q.release("running")
+            out, err = waiter.communicate(timeout=5)
+            self.assertEqual((waiter.returncode, err), (5, b""))
+            lines = out.decode().splitlines()
+            self.assertEqual(sorted(line.split()[1] for line in lines), ["id=0", "id=1", "id=2"])
+            self.assertRegex(lines[-1], r"^finished id=2 exit=5 elapsed=\d+s$")
+            self.assertEqual(timed.communicate(timeout=5), (b"", b""))
+            self.assertEqual(timed.returncode, 5)
+            self.assertEqual(q.call("wait", running), (0, b"", b""))
+            # Tags: all running and queued jobs with the tag, also ones queued later.
+            a = hold("a", "--tag", "t")
+            q.pids("a")
+            b = hold("b", "--tag", "t")
+            q.pids("b")
+            other = hold("other", "--tag", "u")
+            tagged = q.popen("wait", "-v", "--tag", "t")
+            time.sleep(0.3)
+            later = detach("-c", "1", "--tag", "t", "sh", "-c", "exit 7")
+            q.release("a")
+            q.release("b")
+            out, err = tagged.communicate(timeout=5)
+            self.assertEqual((tagged.returncode, err), (7, b""), out)
+            self.assertEqual(sorted(line.split()[1] for line in out.decode().splitlines()),
+                             sorted("id=" + i for i in (a, b, later)))
+            self.assertEqual(q.call("wait", "--tag", "t"), (0, b"", b""))
+            self.assertEqual(q.call("wait", "--timeout", "1s", "--tag", "u", "--tag", "t")[0], 124)
+            q.pids("other")
+            q.release("other")
+            self.assertEqual(q.call("wait", "--tag", "u", done), (3, b"", b""))
+            # Killed jobs report their status; killed queued jobs 125.
+            blocker = hold("blocker")
+            q.pids("blocker")
+            removed = detach("true")
+            self.assertEqual(q.call("kill", removed), (0, b"", b""))
+            self.assertEqual(q.call("kill", blocker), (0, b"", b""))
+            code, out, err = q.call("wait", "-v", blocker, removed)
+            self.assertEqual((code, err), (143, b""))
+            self.assertIn(b"finished id=%s killed " % removed.encode(), out)
+            # Results stay available after they drop out of ls -a.
+            for _ in range(25):
+                detach("-c", "1", "true")
+            eventually(lambda: q.call("ls")[0] == 1)
+            self.assertEqual(q.call("ls", "-a", "--id", done)[0], 1)
+            self.assertEqual(q.call("wait", done), (3, b"", b""))
+            # junban errors.
+            self.own_failure(q.call("wait", "9999"), "unknown job ID 9999")
+            self.own_failure(q.call("wait", done, "9999"), "unknown")
+            for args in ([], ["-v"], ["--timeout", "1s"], ["x"], ["-1"], ["--timeout"],
+                         ["--timeout", "0s", "0"], ["--timeout", "1", "0"], ["--tag"],
+                         ["--tag", "a b"], ["-v", "-v", "0"], ["--timeout", "1s", "--timeout", "1s", "0"]):
+                self.own_failure(q.call("wait", *args))
+            env = dict(q.env, JUNBAN_SOCKET="missing/s")
+            self.own_failure(q.call("wait", "0", env=env))
+            code, out, err = q.call("run", "-c", "1", "sh", "-c", BIN + ' wait "$JUNBAN_JOB_ID"')
+            self.assertEqual(code, 125)
+            self.assertIn(b"cannot wait for itself", err)
+
+    def test_review_fixes_wait_and_detach(self):
+        with Queue(2) as q:
+            # A tagged job running junban wait --tag on its own tag is refused.
+            env = dict(q.env, JUNBAN_TAG="self")
+            code, out, err = q.call("run", "-c", "1", "sh", "-c", BIN + " wait --tag self", env=env)
+            self.assertEqual(code, 125)
+            self.assertIn(b"cannot wait for itself", err)
+            # JUNBAN_TAG is only a default: a valid --tag overrides a bad one.
+            env = dict(q.env, JUNBAN_TAG="bad tag")
+            self.assertEqual(q.call("run", "-c", "1", "--tag", "good", "true", env=env), (0, b"", b""))
+            self.assertIn(b" tag=good ", q.call("ls", "-a", "--tag", "good")[1])
+            # A detached job holds no inherited descriptor, however high.
+            reader, writer = os.pipe()
+            def high_fd():
+                soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+                limit = 6000 if hard == resource.RLIM_INFINITY else min(hard, 6000)
+                resource.setrlimit(resource.RLIMIT_NOFILE, (limit, hard))
+                os.dup2(writer, limit - 1)
+            try:
+                p = q.popen("run", "--detach", "-c", "1", PY, WORKER, "hold", "high.pids",
+                            "high.release", preexec_fn=high_fd, close_fds=False)
+                os.close(writer)
+                writer = -1
+                self.assertEqual(p.wait(timeout=3), 0)
+                q.pids("high")
+                self.assertTrue(select.select([reader], [], [], 3)[0])
+                self.assertEqual(os.read(reader, 1), b"")
+            finally:
+                os.close(reader)
+                if writer >= 0:
+                    os.close(writer)
+            q.release("high")
+
+    def test_wait_timeout_covers_stalled_server(self):
+        with Queue() as q:
+            listener = socket.socket(socket.AF_UNIX)
+            listener.bind(os.path.relpath(q.path / "s"))
+            listener.listen(1)
+            try:
+                started = time.monotonic()
+                p = q.popen("wait", "--timeout", "1s", "0")
+                connection, _ = listener.accept()
+                with connection:
+                    self.assertEqual(receive_message(connection)[0], TYPES["GET_VERSION"])
+                    send_message(connection, "VERSION", PROTOCOL)
+                    self.assertEqual(receive_message(connection)[0], TYPES["JOB_INFO"])
+                    out, err = p.communicate(timeout=5)
+                self.assertEqual((p.returncode, out), (124, b""))
+                self.assertIn(b"timed out", err)
+                self.assertLess(time.monotonic() - started, 3)
+            finally:
+                listener.close()
+
+    def test_review_fixes_logs_kill_and_handshake(self):
+        with Queue(2) as q:
+            # A planted symlink in the log directory is not followed.
+            q.call("ls")
+            (q.path / "s.logs").mkdir(mode=0o755)
+            victim = q.path / "victim"
+            victim.write_text("keep")
+            (q.path / "s.logs" / "0.log").symlink_to(victim)
+            code, out, err = q.call("run", "--detach", "-c", "1", "true")
+            self.assertEqual(code, 125, err)
+            self.assertIn(b"cannot open job log", err)
+            self.assertEqual(victim.read_text(), "keep")
+            self.assertEqual((q.path / "s.logs").stat().st_mode & 0o777, 0o700)
+            (q.path / "s.logs" / "0.log").unlink()
+            (q.path / "s.logs").rmdir()
+            (q.path / "s.logs").symlink_to(q.path)
+            self.own_failure(q.call("run", "--detach", "-c", "1", "true"), "owned by this user")
+            (q.path / "s.logs").unlink()
+            # With stdin closed the queue connection survives detaching.
+            code, out, err = q.call("run", "--detach", "-c", "1", "true",
+                                    stdin=None, preexec_fn=lambda: os.close(0))
+            self.assertEqual(code, 0, err)
+            job = out.decode().strip()
+            eventually(lambda: " exit=0 " in q.call("ls", "-a", "--id", job)[1].decode())
+            # kill --tag from inside a tagged job stops the other jobs too.
+            killer = q.popen("run", "-c", "1", "--tag", "t", "sh", "-c",
+                             "while [ ! -f other.pids ]; do sleep 0.02; done; "
+                             + BIN + " kill --tag t; sleep 5")
+            other = q.popen("run", "-c", "1", "--tag", "t", PY, WORKER, "hold",
+                            "other.pids", "other.release")
+            q.pids("other")
+            self.assertEqual(other.wait(timeout=5), 143)
+            self.assertEqual(killer.wait(timeout=5), 143)
+
+    def test_detach_logs_per_socket_and_closed_streams(self):
+        with Queue(2) as q:
+            # Two queues whose sockets share a directory keep separate logs.
+            for name in ("a", "b"):
+                env = dict(q.env, JUNBAN_SOCKET=name)
+                code, out, err = q.call("run", "--detach", "-c", "1", "echo", name, env=env)
+                self.assertEqual((code, out), (0, b"0\n"), err)
+            for name in ("a", "b"):
+                log = q.path / (name + ".logs") / "0.log"
+                eventually(lambda log=log: log.exists() and log.read_text() == name + "\n")
+            for name in ("a", "b"):
+                self.assertEqual(q.call("shutdown", env=dict(q.env, JUNBAN_SOCKET=name))[0], 0)
+            # A closed stdout or stderr of the caller never becomes the job log.
+            for fd, job in ((2, 0), (1, 1)):
+                code, out, err = q.call("run", "--detach", "-c", "1", "echo", "job",
+                                        preexec_fn=lambda fd=fd: os.close(fd),
+                                        **({"stdout": None} if fd == 1 else {"stderr": None}))
+                self.assertEqual(code, 0 if fd == 2 else 125, (fd, out, err))
+                if fd == 2:
+                    self.assertEqual(out, b"0\n")
+                log = q.path / "s.logs" / ("%d.log" % job)
+                eventually(lambda log=log: log.exists() and log.read_text() == "job\n")
+
+    def test_wait_timeout_covers_handshake(self):
+        with Queue() as q:
+            listener = socket.socket(socket.AF_UNIX)
+            listener.bind(os.path.relpath(q.path / "s"))
+            listener.listen(1)
+            try:
+                started = time.monotonic()
+                p = q.popen("wait", "--timeout", "1s", "0")
+                connection, _ = listener.accept()
+                with connection:
+                    self.assertEqual(receive_message(connection)[0], TYPES["GET_VERSION"])
+                    out, err = p.communicate(timeout=5)
+                self.assertEqual((p.returncode, out), (124, b""))
+                self.assertIn(b"timed out", err)
+                self.assertLess(time.monotonic() - started, 3)
+            finally:
+                listener.close()
 
     def test_estimate_parsing_and_units(self):
         with Queue() as q:
@@ -736,30 +1154,110 @@ class VisibilityOnlyTests(unittest.TestCase):
                 q.release(str(i))
                 self.assertEqual(p.wait(timeout=3), 0)
 
+    def listing_ids(self, q, *args):
+        code, out, err = q.call("ls", "-a", *args)
+        self.assertEqual((code, err), (0 if out else 1, b""))
+        return [int(line.split()[1][3:]) for line in out.decode().splitlines()]
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux allows invalid UTF-8 names")
+    def test_cwd_label_invalid_utf8(self):
+        with Queue() as q:
+            q.call("ls")
+            directory = os.path.join(os.fsencode(q.path), b"bad\xff\xe6\x97")
+            os.mkdir(directory)
+            env = dict(q.env, JUNBAN_SOCKET="../s")
+            self.assertEqual(q.call("run", "true", cwd=directory, env=env), (0, b"", b""))
+            out = eventually(lambda: q.call("ls", "-a")[1])
+            self.assertIn(b" dir=bad%FF%E6%97 ", out)
+
+    def test_watch_wide_directory_names(self):
+        for name, shown in (("日本語のとても長いディレクトリ", "日本語のとても長"),
+                            ("🚀" * 10, "🚀" * 8)):
+            with self.subTest(name=name):
+                self.watch_wide_directory(name, shown)
+
+    def watch_wide_directory(self, name, shown):
+        with Queue() as q:
+            q.call("ls")
+            directory = q.path / name
+            directory.mkdir()
+            env = dict(q.env, JUNBAN_SOCKET="../s")
+            job = q.popen("run", "-c", "1", PY, WORKER, "hold", q.path / "wide.pids",
+                          q.path / "wide.release", cwd=directory, env=env)
+            q.pids("wide")
+            master, slave = pty.openpty()
+            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 60, 0, 0))
+            def controlling_terminal():
+                os.setsid()
+                fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+                os.tcsetpgrp(0, os.getpgrp())
+            try:
+                p = subprocess.Popen([BIN, "watch"], cwd=q.path, env=q.env, stdin=slave,
+                                     stdout=slave, stderr=slave, preexec_fn=controlling_terminal)
+                q.clients.append(p)
+                screen = read_until(master, lambda data: shown[:2].encode() in data)
+                p.terminate()
+                end = time.monotonic() + 3
+                while p.poll() is None and time.monotonic() < end:
+                    if select.select([master], [], [], 0.05)[0]:
+                        os.read(master, 65536)
+                self.assertEqual(p.wait(timeout=1), 0)
+            finally:
+                os.close(master)
+                os.close(slave)
+            clean = re.sub(rb"\x1b\[[0-?]*[ -/]*[@-~]", b"", screen).decode().replace("\r", "")
+            def columns(text):
+                return sum(2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in text)
+            rows = clean.split("RUNNING", 1)[1].splitlines()
+            header, row = rows[1], rows[2]
+            self.assertNotIn("%E", row)
+            # The DIR cell holds whole characters within 16 columns, so the
+            # CPUS column lines up with its header.
+            self.assertIn(" %s " % shown, row)
+            self.assertEqual(columns(header[:header.index("CPUS") + 4]),
+                             columns(row[:row.index(" 1 ") + 2]))
+            self.assertTrue(all(columns(line) < 60 for line in clean.splitlines()), clean)
+            q.release("wide")
+            self.assertEqual(job.wait(timeout=3), 0)
+
     def test_cwd_label(self):
         with Queue() as q:
             q.call("ls")
-            for name in ("AHC075-a", "kaggle-x", "space\n\x1b-label"):
+            names = ("AHC075-a", "kaggle-x", "space\n\x1b-label", "課題",
+                     "テ\u3099ータ", "c1\u0085-%", "長" * 50, "a\u3000b", "l\u2028s",
+                     "bidi\u202e", "🚀")
+            for name in names:
                 directory = q.path / name
                 directory.mkdir()
                 env = dict(q.env, JUNBAN_SOCKET="../s")
                 self.assertEqual(q.call("run", "true", cwd=directory, env=env), (0, b"", b""))
-            lines = eventually(lambda: self.listing(q, True) if len(self.listing(q, True)) == 4 else None)
+            lines = eventually(lambda: self.listing(q, True) if len(self.listing(q, True)) == len(names) else None)
             self.assertTrue(any(" dir=AHC075-a " in line for line in lines))
             self.assertTrue(any(" dir=kaggle-x " in line for line in lines))
             self.assertTrue(any(" dir=space%0A%1B-label " in line for line in lines))
+            # Printable UTF-8 stays readable; C1 controls, spaces and % are encoded.
+            self.assertTrue(any(" dir=課題 " in line for line in lines), lines)
+            self.assertTrue(any(" dir=テ\u3099ータ " in line for line in lines), lines)
+            self.assertTrue(any(" dir=c1%C2%85-%25 " in line for line in lines), lines)
+            # Unicode whitespace, line separators and format characters too.
+            for encoded in ("a%E3%80%80b", "l%E2%80%A8s", "bidi%E2%80%AE", "🚀"):
+                self.assertTrue(any(" dir=%s " % encoded in line for line in lines), (encoded, lines))
+            # Long names are cut on a character boundary.
+            self.assertTrue(any(re.search(r" dir=長{40,42}\.\.\. ", line) for line in lines), lines)
+            self.assertEqual(self.listing_ids(q, "--dir", "課題"), [3])
             self.assertNotIn("\x1b", "\n".join(lines))
+            self.assertNotIn("\u0085", "\n".join(lines))
 
     def test_history_last_20_newest_first(self):
         with Queue() as q:
             for i in range(25):
                 self.assertEqual(q.call("run", "sh", "-c", "exit %d" % (i % 8)),
                                  (i % 8, b"", b""))
-            eventually(lambda: len(self.listing(q, True)) == 21)
+            eventually(lambda: len(self.listing(q, True)) == 20)
             short, full = self.listing(q), self.listing(q, True)
-            self.assertEqual(short, ["cpus 0/4 running 0 queued 0"])
-            self.assertEqual([int(line.split()[1].split("=")[1]) for line in full[1:]], list(range(24, 4, -1)))
-            for i, line in zip(range(24, 4, -1), full[1:]):
+            self.assertEqual(short, [])
+            self.assertEqual([int(line.split()[1].split("=")[1]) for line in full], list(range(24, 4, -1)))
+            for i, line in zip(range(24, 4, -1), full):
                 self.assertRegex(line, r"^done id=%d dir=\S+ cpus=all\(4\) elapsed=\d+s exit=%d cmd=sh -c exit %d$"
                                  % (i, i % 8, i % 8))
             self.own_failure(q.call("kill", "24"), "unknown")
@@ -775,12 +1273,13 @@ class VisibilityOnlyTests(unittest.TestCase):
             later = q.start("later", 1)
             q.wait_rows(3)
             lines = self.listing(q)
-            self.assertEqual(lines[0], "cpus 3/4 running 1 queued 2")
-            self.assertRegex(lines[1], r"^running id=0 dir=\S+ cpus=3 elapsed=\d+s est=1s(?: over)? cmd=.+")
-            self.assertRegex(lines[2], r"^queued id=1 dir=\S+ cpus=all\(4\) waited=\d+s est=2m cmd=.+")
-            self.assertRegex(lines[3], r"^queued id=2 dir=\S+ cpus=1 waited=\d+s cmd=.+")
-            self.assertLessEqual(len(lines[1].split(" cmd=", 1)[1]), 80)
-            eventually(lambda: " over " in self.listing(q)[1])
+            self.assertEqual(q.call("ls", "--summary"), (0, b"cpus 3/4 running 1 queued 2\n", b""))
+            self.assertEqual(len(lines), 3)
+            self.assertRegex(lines[0], r"^running id=0 dir=\S+ cpus=3 elapsed=\d+s est=1s(?: over)? cmd=.+")
+            self.assertRegex(lines[1], r"^queued id=1 dir=\S+ cpus=all\(4\) waited=\d+s est=2m cmd=.+")
+            self.assertRegex(lines[2], r"^queued id=2 dir=\S+ cpus=1 waited=\d+s cmd=.+")
+            self.assertLessEqual(len(lines[0].split(" cmd=", 1)[1]), 80)
+            eventually(lambda: " over " in self.listing(q)[0])
             self.assertIsNone(p.poll(), "estimate must never stop the job")
             artifact("ls-over.txt", ("\n".join(self.listing(q)) + "\n").encode())
             self.assertEqual(q.call("kill", "1"), (0, b"", b""))
@@ -841,7 +1340,7 @@ class VisibilityOnlyTests(unittest.TestCase):
             q.pids("watch-job")
             waiting = q.start("watch-wait")
             q.wait_rows(2)
-            eventually(lambda: " over " in self.listing(q)[1])
+            eventually(lambda: " over " in self.listing(q)[0])
             for method in ("q", "ctrl-c"):
                 master, slave = pty.openpty()
                 fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
@@ -1067,8 +1566,8 @@ class ReviewFixTests(unittest.TestCase):
                     # Leave the stalled connection open throughout recovery.
                     self.assertEqual(following.wait(timeout=6), 0)
                     out, err = listing.communicate(timeout=3)
-                    self.assertEqual((listing.returncode, err), (0, b""))
-                    self.assertTrue(out.startswith(b"cpus "))
+                    self.assertEqual((listing.returncode, err), (0 if out else 1, b""))
+                    self.assertRegex(out, rb"^(?:(?:running|queued) id=\d+ .*\n)*$")
                     self.assertEqual(bad.recv(1), b"")
 
     def test_stalled_snapshot_reader_times_out_without_disconnect(self):
@@ -1085,8 +1584,8 @@ class ReviewFixTests(unittest.TestCase):
                 self.assertEqual(running.wait(timeout=3), 0)
                 listing = q.popen("ls")
                 out, err = listing.communicate(timeout=7)
-                self.assertEqual((listing.returncode, err), (0, b""))
-                self.assertTrue(out.startswith(b"cpus "))
+                self.assertEqual((listing.returncode, err), (0 if out else 1, b""))
+                self.assertRegex(out, rb"^(?:(?:running|queued) id=\d+ .*\n)*$")
                 eventually(lambda: all(p.poll() == 0 for p in waiting), 8)
 
     def test_blocked_ls_stdout_does_not_hold_server(self):
@@ -1110,7 +1609,7 @@ class ReviewFixTests(unittest.TestCase):
                 q.release("running")
                 self.assertEqual(running.wait(timeout=3), 0)
                 eventually(lambda: all(p.poll() == 0 for p in waiting), 8)
-                self.assertEqual(q.call("ls")[0], 0)
+                self.assertEqual(q.call("ls")[0], 1)
                 self.assertIsNone(listing.poll(), "stdout must still be blocked")
                 listing.kill()
                 listing.wait(timeout=3)
@@ -1140,7 +1639,7 @@ class ReviewFixTests(unittest.TestCase):
                 q.release("running")
                 self.assertEqual(running.wait(timeout=3), 0)
                 eventually(lambda: all(p.poll() == 0 for p in waiting), 8)
-                self.assertEqual(q.call("ls")[0], 0)
+                self.assertEqual(q.call("ls")[0], 1)
                 self.assertIsNone(monitor.poll(), "terminal output must still be blocked")
                 monitor.kill()
                 monitor.wait(timeout=3)

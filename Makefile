@@ -11,6 +11,8 @@ junban: $(OBJECTS)
 %.o: %.c main.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
+visibility.o: unicode_tables.h
+
 .PHONY: test install uninstall clean
 test: junban
 	python3 tests/test_queue.py

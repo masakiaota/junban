@@ -7,11 +7,12 @@
 */
 enum
 {
-    PROTOCOL_VERSION=733
+    PROTOCOL_VERSION=734
 };
 
 /* Retired message numbers and fields are reserved to preserve the 40-byte
- * frame and the version-733 layout. No retired request has a handler. */
+ * frame. No retired request has a handler. Version 734 adds the job tag
+ * and the detached job's log path to the NEWJOB payload and to Job_view. */
 enum msg_types
 {
     KILL_SERVER,
@@ -52,12 +53,13 @@ enum msg_types
     SNAPSHOT_ROW,
     SNAPSHOT_END,
     WAIT_NOTICE,
-    NOTICE_END
+    NOTICE_END,
+    JOB_INFO
 };
 
 enum Request
 {
-    c_QUEUE, c_KILL_SERVER, c_LIST, c_KILL_JOB, c_WATCH
+    c_QUEUE, c_KILL_SERVER, c_LIST, c_KILL_JOB, c_WATCH, c_KILL_TAG, c_WAIT
 };
 
 struct Command_line {
@@ -73,6 +75,19 @@ struct Command_line {
     int num_slots; /* Zero means all slots, unspecified by caller. */
     unsigned long long estimate;
     int list_all;
+    int list_summary;
+    /* Job selection for ls: a job must match one value of each given option. */
+    int *ids;
+    int num_ids;
+    char **dirs;
+    int num_dirs;
+    char **tags;
+    int num_tags;
+    char *tag; /* The tag of a new job, or NULL. */
+    int detach;
+    int verbose;
+    unsigned long long timeout; /* Seconds; zero waits forever. */
+    char *log_prefix; /* Log directory of a detached job, ending in '/'. */
 };
 
 enum Process_type {
@@ -103,10 +118,10 @@ struct msg
     {
         struct {
             int command_size;
-            int reserved_store_output;
+            int log_size;
             int reserved_should_keep_finished;
             int label_size;
-            int reserved_env_size;
+            int tag_size;
             int reserved_do_depend;
             int reserved_depend_on;
             int reserved_wait_enqueuing;
@@ -130,6 +145,11 @@ struct msg
         int size;
         int reserved_last_errorlevel;
         int max_slots;
+        /* SNAPSHOT_END: max_slots aliases u.max_slots. */
+        struct {
+            int max_slots;
+            int next_jobid;
+        } snapshot_end;
         int version;
     } u;
 };
@@ -144,6 +164,8 @@ struct Job
     int should_keep_finished;
     int pid;
     char *label;
+    char *tag;
+    char *log;
     int num_slots;
     int cpus_unspecified;
     int kill_requested;
@@ -162,11 +184,14 @@ struct Job_view {
     double elapsed, waited;
     unsigned long long estimate;
     char label[128];
+    char tag[64];
+    char log[512];
     char command[81];
 };
 
 struct Snapshot {
     int busy, total, running, queued;
+    int next_jobid; /* The ID the next job gets, read with the same listing. */
     size_t count;
     struct Job_view *jobs;
 };
@@ -174,12 +199,16 @@ struct Snapshot {
 double monotime(void);
 void format_duration(char *dst, size_t size, unsigned long long seconds);
 void job_view(const struct Job *job, struct Job_view *view);
+void fit_columns(char *dst, size_t size, const char *src, int columns, int pad);
 void view_cpus(const struct Job_view *view, char *dst, size_t size);
 void view_fields(const struct Job_view *view, char *dst, size_t size);
 void view_status(const struct Job_view *view, char *dst, size_t size);
-void print_snapshot(const struct Snapshot *snapshot);
+void print_summary(const struct Snapshot *snapshot);
+int job_selected(const struct Job_view *view);
+int print_snapshot(const struct Snapshot *snapshot);
 int fetch_snapshot(struct Snapshot *snapshot);
 void s_snapshot(int socket, int all);
+void s_job_info(int socket, int jobid);
 void s_wait_notice(int socket, int jobid);
 void c_watch(void);
 int s_has_jobs(void);
@@ -199,6 +228,11 @@ void c_check_version();
 void c_send_runjob_ok(int pid);
 void c_shutdown_server();
 void c_kill_job();
+int c_kill_tag(void);
+char *c_log_prefix(void);
+void c_detach(void);
+void c_wait_prepare(void);
+int c_wait(void);
 void c_get_max_slots();
 
 /* jobs.c */

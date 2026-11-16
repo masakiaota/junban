@@ -40,13 +40,11 @@ static void stop_watch(int signal_number)
 
 static void line(const char *text, const char *colour, int width, int *row, int height)
 {
+    char fitted[1024];
     if (*row >= height - 1) return;
-    int length = (int)strlen(text);
-    if (length >= width) length = width - 1;
-    if (length < 0) length = 0;
-    /* Avoid cutting a UTF-8 command in the middle of a character. */
-    while (length > 0 && ((unsigned char)text[length] & 0xc0) == 0x80) --length;
-    printf("%s%.*s\033[0m\033[K\n", colour, length, text);
+    /* Count terminal columns, not bytes, and never split a character. */
+    fit_columns(fitted, sizeof(fitted), text, width > 1 ? width - 1 : 0, 0);
+    printf("%s%s\033[0m\033[K\n", colour, fitted);
     ++*row;
 }
 
@@ -114,7 +112,7 @@ static void draw(const struct Snapshot *snapshot)
         for (size_t i = 0; i < snapshot->count && count < shown[section]; ++i) {
             const struct Job_view *v = &snapshot->jobs[i];
             if (v->state != states[section]) continue;
-            char timing[48], detail[64] = "", cpus[32];
+            char timing[48], detail[64] = "", cpus[32], dir[sizeof(v->label) + 16];
             if (v->unspecified) snprintf(cpus, sizeof(cpus), "all");
             else snprintf(cpus, sizeof(cpus), "%d", v->cpus);
             format_duration(timing, sizeof(timing), (unsigned long long)
@@ -128,8 +126,9 @@ static void draw(const struct Snapshot *snapshot)
                 format_duration(estimate, sizeof(estimate), v->estimate);
                 snprintf(detail, sizeof(detail), "%s%s", estimate, over ? " OVER" : "");
             }
-            snprintf(text, sizeof(text), " %*d %-*.*s %*s %-*s %-*s %s",
-                     id_width, v->jobid, dir_width, dir_width, v->label, cpu_width, cpus,
+            fit_columns(dir, sizeof(dir), v->label, dir_width, 1);
+            snprintf(text, sizeof(text), " %*d %s %*s %-*s %-*s %s",
+                     id_width, v->jobid, dir, cpu_width, cpus,
                      time_width, timing, detail_width, detail, v->command);
             line(text, over ? "\033[1;31m" : colours[section], width, &row, height);
             ++count;

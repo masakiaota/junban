@@ -6,6 +6,29 @@ agent-readable listings and wait notifications, a terminal watch view, and macOS
 idle-sleep prevention. Removed the old command-line interface and obsolete
 packaging, output capture, mail, dependencies, and queue-reordering features.
 
+v0.1.1 (changes junban ls output and exit status for scripts):
+ - junban ls prints only job lines on standard output, each starting with
+   running, queued or done. An empty queue prints nothing. The summary line
+   "cpus B/T running N queued N" moved to junban ls --summary. (#3)
+ - junban ls exits with 1 when it lists no job (it used to exit with 0).
+   It exits with 0 when it lists a job and 125 on junban errors. (#4)
+ - junban ls takes --id N and --dir NAME to list only some jobs. (#5)
+ - Jobs can carry a tag: junban run --tag TAG, or JUNBAN_TAG in the
+   environment. ls shows it as tag=TAG and takes --tag; junban kill --tag
+   stops all jobs with a tag. The protocol version is now 734, so a running
+   older server must be stopped with junban shutdown (which still works
+   across versions) after upgrading. (#6)
+ - junban run --detach queues the job, prints only its ID and returns. The
+   job's output goes to <queue socket>.logs/ID.log, shown as log= in ls. (#2)
+ - junban wait [-v] [--timeout DUR] [--tag TAG]... [ID...] blocks until jobs
+   finish. It exits with their highest exit status, 124 on timeout and 125
+   on junban errors. The server now keeps the results of the last 1000
+   finished jobs for it; ls -a still shows the newest 20. (#1)
+ - dir= keeps printable UTF-8 such as Japanese directory names instead of
+   writing them as %XX; control and format characters, Unicode whitespace,
+   % and invalid bytes are still encoded. junban watch measures columns in
+   terminal cells, using tables generated from Unicode data. (#10)
+
 ## Features to be implemented
 
 Doubtful tasks:

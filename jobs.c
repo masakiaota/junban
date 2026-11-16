@@ -129,12 +129,14 @@ void s_snapshot(int socket, int all)
         if (p->state == RUNNING) send_view(socket, p);
     for (p = firstjob; p; p = p->next)
         if (p->state == QUEUED) send_view(socket, p);
-    for (p = first_finished_job; p && count < 20; p = p->next)
-        finished[count++] = p;
-    for (int i = count - 1; i >= 0 && limit; --i, --limit)
-        send_view(socket, finished[i]);
+    /* Listings show only the newest 20 of the kept results. */
+    for (p = first_finished_job; p; p = p->next)
+        finished[count++ % 20] = p;
+    for (int i = count - 1; i >= 0 && i >= count - 20 && limit; --i, --limit)
+        send_view(socket, finished[i % 20]);
     end.type = SNAPSHOT_END;
-    end.u.max_slots = max_slots;
+    end.u.snapshot_end.max_slots = max_slots;
+    end.u.snapshot_end.next_jobid = jobids;
     send_msg(socket, &end);
 }
 
@@ -190,10 +192,22 @@ static struct Job * newjobptr()
 }
 
 /* Returns job id or -1 on error */
+/* Read a NUL-terminated string of size bytes into a new buffer, or leave
+ * *dst NULL for size 0. Returns 0 if the client went away. */
+static int recv_string(int s, int size, char **dst)
+{
+    if (size <= 0) return 1;
+    if (!(*dst = malloc((size_t)size)))
+        error("Cannot allocate memory in s_newjob (%i)", size);
+    if (recv_bytes(s, *dst, size) != size) return 0;
+    (*dst)[size - 1] = '\0';
+    return 1;
+}
+
 int s_newjob(int s, struct msg *m)
 {
     struct Job *p;
-    int res;
+    char *log_dir = NULL;
 
     p = newjobptr();
 
@@ -215,37 +229,29 @@ int s_newjob(int s, struct msg *m)
     p->kill_requested = 0;
     p->should_keep_finished = p->state != HOLDING_CLIENT;
     p->label = 0;
+    p->tag = 0;
+    p->log = 0;
 
     if (recv_bytes(s, (char *)&p->estimate, sizeof(p->estimate)) != (int)sizeof(p->estimate))
         goto disconnected;
 
-    /* load the command */
-    p->command = malloc(m->u.newjob.command_size);
-    if (p->command == 0)
-        error("Cannot allocate memory in s_newjob command_size (%i)",
-                m->u.newjob.command_size);
-    res = recv_bytes(s, p->command, m->u.newjob.command_size);
-    if (res != m->u.newjob.command_size)
+    if (!recv_string(s, m->u.newjob.command_size, &p->command) ||
+        !recv_string(s, m->u.newjob.label_size, &p->label) ||
+        !recv_string(s, m->u.newjob.tag_size, &p->tag) ||
+        !recv_string(s, m->u.newjob.log_size, &log_dir))
         goto disconnected;
-    p->command[m->u.newjob.command_size - 1] = '\0';
 
-    /* load the label */
-    p->label = 0;
-    if (m->u.newjob.label_size > 0)
-    {
-        char *ptr;
-        ptr = (char *) malloc(m->u.newjob.label_size);
-        if (ptr == 0)
-            error("Cannot allocate memory in s_newjob label_size(%i)",
-                    m->u.newjob.label_size);
-        p->label = ptr;
-        res = recv_bytes(s, ptr, m->u.newjob.label_size);
-        if (res != m->u.newjob.label_size)
-            goto disconnected;
+    /* The client sends the log directory; the file is named after the job ID. */
+    if (log_dir) {
+        size_t size = strlen(log_dir) + 16;
+        if (!(p->log = malloc(size))) error("Cannot allocate memory in s_newjob");
+        snprintf(p->log, size, "%s%d.log", log_dir, p->jobid);
+        free(log_dir);
     }
 
     return p->jobid;
 disconnected:
+    free(log_dir);
     {
         struct Result result = {0};
         p->should_keep_finished = 0;
@@ -289,10 +295,33 @@ int next_run_job()
     return -1;
 }
 
-/* junban keeps the last 20 finished jobs. */
+/* junban keeps the results of the last 1000 finished jobs, so junban wait
+ * can report a job that finished long ago. ls shows the newest 20. */
 static int get_max_finished_jobs()
 {
-    return 20;
+    return 1000;
+}
+
+/* A negative ID asks for the ID the next job will get. */
+void s_job_info(int socket, int jobid)
+{
+    struct Job *p;
+    if (jobid < 0) {
+        struct msg next = {0};
+        next.type = JOB_INFO;
+        next.u.jobid = jobids;
+        send_msg(socket, &next);
+        return;
+    }
+    p = findjob(jobid);
+    if (!p)
+        for (p = first_finished_job; p && p->jobid != jobid; p = p->next) {}
+    if (p) send_view(socket, p);
+    else {
+        struct msg unknown = {0};
+        unknown.type = NEWJOB_NOK;
+        send_msg(socket, &unknown);
+    }
 }
 
 /* Add the job to the finished queue. */
@@ -334,6 +363,8 @@ static void new_finished_job(struct Job *j)
         first_finished_job = first_finished_job->next;
         free(tmp->command);
         free(tmp->label);
+        free(tmp->tag);
+        free(tmp->log);
         free(tmp);
     }
     p->next = j;
@@ -412,6 +443,8 @@ void job_finished(const struct Result *result, int jobid)
         if (!p->should_keep_finished) {
             free(p->command);
             free(p->label);
+            free(p->tag);
+            free(p->log);
             free(p);
         }
     }

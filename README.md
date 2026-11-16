@@ -48,6 +48,35 @@ junban: id=1 started after 1s
 
 These messages go to standard error. Standard output carries only the command's own output.
 
+### Run a job in the background
+
+`junban run` returns when the job ends. To run several jobs in parallel, use `--detach`. It puts the job in the queue, prints only the job ID on standard output, and returns at once:
+
+```console
+$ id=$(junban run --detach -c 8 python train.py)
+junban: id=63 log=/Users/me/Library/Caches/junban/queue.sock.logs/63.log
+```
+
+The job then waits for its turn and runs as usual. Its standard output and standard error go to the file `queue.sock.logs/ID.log` in the queue directory (`~/Library/Caches/junban` on macOS; `$XDG_RUNTIME_DIR/junban` or `~/.cache/junban` on Ubuntu). The path is also shown as `log=` in `junban ls`. Its standard input is `/dev/null`. Wait for it with `junban wait`, described next. Job IDs start again from 0 when the junban server restarts, and a new job then overwrites an old log with the same ID.
+
+### Wait for jobs
+
+`junban wait` blocks until the given jobs have finished. Its exit status is the highest exit status of those jobs, so it is 0 when all of them succeeded:
+
+```console
+$ a=$(junban run --detach -c 4 python train.py --fold 0)
+$ b=$(junban run --detach -c 4 python train.py --fold 1)
+$ junban wait "$a" "$b"
+```
+
+- Jobs that have already finished are judged at once from their results. junban keeps the results of the last 1000 finished jobs.
+- `--timeout DUR` gives up after `DUR` (`90s`, `30m`, `2h`, `1d`) and exits with 124. The jobs keep running.
+- `--tag TAG` waits for every job with that tag that is running or queued when the wait starts, or is queued while it waits. Jobs with the tag that had already finished are not included. To know each job's result, wait by ID.
+- By default it prints nothing. With `-v`, it prints one line on standard output each time a job finishes: `finished id=63 exit=0 elapsed=4m12s`.
+- It exits with 125 for junban's own errors, such as an unknown job ID or not being able to reach the queue.
+
+Wait with `junban wait`, not with a loop around `junban ls`. A loop over the whole listing also waits for other agents' jobs.
+
 ### Say how long it will take
 
 You can tell junban how long you expect a job to take with `--estimate`. Write the time with a unit: `90s`, `30m`, `2h`, `1d`.
@@ -58,18 +87,46 @@ $ junban run -c 8 --estimate 2h python train.py
 
 The estimate is shown to jobs that are waiting. A job is never stopped for running past its estimate.
 
+### Tag your jobs
+
+`--tag` puts a tag on a job, so you can treat your jobs as a group. If the environment variable `JUNBAN_TAG` is set, jobs get that tag without `--tag`. Set it once per agent session and its jobs are grouped automatically. A tag is 1 to 63 characters from `A-Z a-z 0-9 . _ : @ + -`.
+
+```console
+$ export JUNBAN_TAG=agent-1
+$ junban run -c 4 python train.py
+$ junban ls --tag agent-1
+running id=5 dir=demo tag=agent-1 cpus=4 elapsed=10s cmd=python train.py
+$ junban kill --tag agent-1
+```
+
+`junban kill --tag TAG` stops every running and queued job with that tag. It exits with 1 when there is no such job.
+
 ### Check the queue
 
-`junban ls` lists the running and waiting jobs.
+`junban ls` lists the running and waiting jobs, one job per line.
 
 ```console
 $ junban ls
-cpus 1/4 running 1 queued 1
 running id=0 dir=demo cpus=1 elapsed=1s est=30m cmd=sleep 30
 queued id=1 dir=demo cpus=all(4) waited=1s est=5m cmd=sh -c echo evaluated
 ```
 
-`dir` is the name of the directory the job was started from. `cpus=all(4)` means the job was started without `-c`. A job that has run past its estimate is marked `over`. To see finished jobs as well, use `junban ls -a`.
+`dir` is the name of the directory the job was started from. `cpus=all(4)` means the job was started without `-c`. A job that has run past its estimate is marked `over`. To see finished jobs as well, use `junban ls -a`; their lines start with `done`.
+
+Standard output of `junban ls` carries job lines only, and every line starts with the job's state: `running`, `queued` or `done`. When there are no jobs, it prints nothing. Like `grep`, `junban ls` exits with 0 when it listed at least one job, 1 when it listed none, and 125 for junban's own errors. To see how many CPUs are in use, use `junban ls --summary`:
+
+```console
+$ junban ls --summary
+cpus 1/4 running 1 queued 1
+```
+
+To list only some jobs, use `--id N` for a job ID, `--dir NAME` for the directory shown as `dir=`, and `--tag TAG` for a tag. Both can be repeated, and they can be combined with each other and with `-a`. The exit status then tells whether any of those jobs is listed:
+
+```console
+$ junban ls --id 63 --id 64
+running id=63 dir=demo cpus=8 elapsed=5m cmd=python train.py
+$ junban ls -a --dir demo
+```
 
 For people, `junban watch` is easier to read. The screen refreshes every two seconds. Press `q` to quit.
 
@@ -114,8 +171,14 @@ Put something like this in `AGENTS.md` or `CLAUDE.md`:
 - Give the number of CPUs with -c, counting threads and child processes.
 - Run benchmarks that measure run time without -c.
 - When you can guess how long a job will take, say so with --estimate.
-- When you have to wait, check junban ls. Do not stop other agents' jobs.
+- junban run in the foreground does not return until the job ends. To run jobs
+  in parallel, start each with id=$(junban run --detach ...) and pass the IDs
+  to junban wait. Its exit status is the highest exit status of the jobs.
+- Never wait with a loop that greps the output of junban ls.
+- Do not stop other agents' jobs.
 ```
+
+If each agent session sets its own `JUNBAN_TAG` (for example `export JUNBAN_TAG=agent-1`), you can add a line such as `To stop all of your jobs, use junban kill --tag "$JUNBAN_TAG".`
 
 ## Limitations
 

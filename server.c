@@ -333,6 +333,9 @@ static enum Break
         case SNAPSHOT:
             s_snapshot(s, m.u.size);
             break;
+        case JOB_INFO:
+            s_job_info(s, m.u.jobid);
+            break;
         case WAIT_NOTICE:
             if (client_cs[index].hasjob)
                 s_wait_notice(s, client_cs[index].jobid);
@@ -340,6 +343,9 @@ static enum Break
         case NEWJOB:
             if (client_cs[index].hasjob || m.u.newjob.command_size < 1 ||
                 m.u.newjob.num_slots < 0 ||
+                m.u.newjob.label_size < 0 || m.u.newjob.label_size > 4096 ||
+                m.u.newjob.tag_size < 0 || m.u.newjob.tag_size > 64 ||
+                m.u.newjob.log_size < 0 || m.u.newjob.log_size > 4096 ||
                 m.u.newjob.num_slots > max_slots)
                 return CLOSE;
             client_cs[index].jobid = s_newjob(s, &m);
