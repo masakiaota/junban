@@ -283,7 +283,9 @@ static int schedule(const struct Job *stop, int *short_cpus, int *short_gpus)
 {
     int free_cpus = max_slots - busy_slots, free_gpus = max_gpus - busy_gpus;
     struct Job *p;
-    for (p = firstjob; p != 0 && free_cpus > 0; p = p->next) {
+    /* The notice scans up to its job even when no CPU is left, so it also
+     * sees the GPUs that earlier jobs reserve. */
+    for (p = firstjob; p != 0 && (stop || free_cpus > 0); p = p->next) {
         if (p->state != QUEUED) continue;
         /* A job being killed in the queue keeps its reservation until it goes. */
         int fits = !p->kill_requested && p->num_slots <= free_cpus &&
@@ -301,7 +303,6 @@ static int schedule(const struct Job *stop, int *short_cpus, int *short_gpus)
         free_cpus = free_cpus > p->num_slots ? free_cpus - p->num_slots : 0;
         free_gpus = free_gpus > p->num_gpus ? free_gpus - p->num_gpus : 0;
     }
-    if (stop) *short_cpus = 1, *short_gpus = stop->num_gpus > free_gpus;
     return -1;
 }
 

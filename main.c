@@ -114,7 +114,8 @@ int main(int argc, char **argv)
         puts("      List running and queued jobs. -a adds the last 20 finished jobs.");
         puts("      --id N, --dir NAME, --tag TAG   Only matching jobs. Each option is repeatable;");
         puts("                       a job must match one value of every option given.");
-        puts("  junban ls --summary  Print only the queue totals: cpus BUSY/TOTAL gpus BUSY/TOTAL running N queued N");
+        puts("  junban ls --summary  Print only the queue totals:");
+        puts("                       cpus BUSY/TOTAL gpus BUSY/TOTAL running N queued N");
         puts("  junban watch         Live view for a terminal. q quits.");
         puts("  junban kill ID       Stop a running job, or remove a queued one.");
         puts("  junban kill --tag TAG   Do that to every running and queued job tagged TAG.");
