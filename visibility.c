@@ -140,6 +140,7 @@ void job_view(const struct Job *job, struct Job_view *view)
     view->jobid = job->jobid;
     view->state = job->state;
     view->cpus = job->num_slots;
+    view->gpus = job->num_gpus;
     view->unspecified = job->cpus_unspecified;
     view->killed = job->kill_requested;
     view->client_lost = job->client_lost;
@@ -191,12 +192,14 @@ int fetch_snapshot(struct Snapshot *snapshot)
     m.u.size = command_line.list_all;
     send_msg(server_socket, &m);
     snapshot->busy = snapshot->total = snapshot->running = snapshot->queued = 0;
+    snapshot->busy_gpus = snapshot->total_gpus = 0;
     snapshot->count = 0;
     for (;;) {
         if (recv_msg(server_socket, &m) != (int)sizeof(m)) return 0;
         if (m.type == SNAPSHOT_END) {
             snapshot->total = m.u.snapshot_end.max_slots;
             snapshot->next_jobid = m.u.snapshot_end.next_jobid;
+            snapshot->total_gpus = m.u.snapshot_end.max_gpus;
             return 1;
         }
         if (m.type == NEWJOB_NOK) return 0;
@@ -209,15 +212,19 @@ int fetch_snapshot(struct Snapshot *snapshot)
         struct Job_view *v = &next[count++];
         snapshot->count = count;
         if (!snapshot->total) snapshot->total = m.u.max_slots;
-        if (v->state == RUNNING) { snapshot->busy += v->cpus; ++snapshot->running; }
+        if (v->state == RUNNING) {
+            snapshot->busy += v->cpus;
+            snapshot->busy_gpus += v->gpus;
+            ++snapshot->running;
+        }
         if (v->state == QUEUED) ++snapshot->queued;
     }
 }
 
 void print_summary(const struct Snapshot *snapshot)
 {
-    printf("cpus %d/%d running %d queued %d\n", snapshot->busy, snapshot->total,
-           snapshot->running, snapshot->queued);
+    printf("cpus %d/%d gpus %d/%d running %d queued %d\n", snapshot->busy, snapshot->total,
+           snapshot->busy_gpus, snapshot->total_gpus, snapshot->running, snapshot->queued);
 }
 
 int job_selected(const struct Job_view *view)
@@ -261,7 +268,7 @@ int print_snapshot(const struct Snapshot *snapshot)
                v->state == RUNNING ? "running" : v->state == QUEUED ? "queued" : "done",
                v->jobid, v->label);
         if (v->tag[0]) printf(" tag=%s", v->tag);
-        printf(" cpus=%s %s", cpus, timing);
+        printf(" cpus=%s gpus=%d %s", cpus, v->gpus, timing);
         if (v->state != RUNNING && v->state != QUEUED) {
             view_status(v, status, sizeof(status));
             printf(" %s", status);

@@ -19,7 +19,7 @@ int server_socket = -1;
 
 static void usage(void)
 {
-    error("usage: run [-c N | --cpus N] [--estimate DUR] [--tag TAG] [--detach] [--] command [args...]; ls [-a] [--id N]... [--dir NAME]... [--tag TAG]... | ls --summary; wait [-v] [--timeout DUR] [--tag TAG]... [ID...]; watch; kill ID | kill --tag TAG; shutdown; help; version");
+    error("usage: run [-c N | --cpus N] [-g N | --gpus N] [--estimate DUR] [--tag TAG] [--detach] [--] command [args...]; ls [-a] [--id N]... [--dir NAME]... [--tag TAG]... | ls --summary; wait [-v] [--timeout DUR] [--tag TAG]... [ID...]; watch; kill ID | kill --tag TAG; shutdown; help; version");
 }
 
 static unsigned long long duration(const char *s, const char *what)
@@ -94,9 +94,11 @@ int main(int argc, char **argv)
     if (!strcmp(argv[1], "help") || !strcmp(argv[1], "--help")) {
         if (argc != 2) usage();
         puts("Usage:");
-        puts("  junban run [-c N] [--estimate DUR] [--tag TAG] [--detach] [--] COMMAND [ARGS...]");
+        puts("  junban run [-c N] [-g N] [--estimate DUR] [--tag TAG] [--detach] [--] COMMAND [ARGS...]");
         puts("      Wait for a turn, then run COMMAND as if it were run directly. Returns when it ends.");
         puts("      -c N, --cpus N   CPUs the job uses. Without it, the job takes all CPUs and runs alone.");
+        puts("      -g N, --gpus N   GPUs the job uses: 0 or 1. Without it, 0. Neither option changes");
+        puts("                       the other: a GPU job that needs little CPU gives both, as -c 1 -g 1.");
         puts("      --estimate DUR   Expected duration: 90s, 30m, 2h, 1d. Shown to others. Never a timeout.");
         puts("      --tag TAG        Label the job as yours. Default: $JUNBAN_TAG.");
         puts("                       1-63 characters of A-Z a-z 0-9 . _ : @ + -");
@@ -112,7 +114,7 @@ int main(int argc, char **argv)
         puts("      List running and queued jobs. -a adds the last 20 finished jobs.");
         puts("      --id N, --dir NAME, --tag TAG   Only matching jobs. Each option is repeatable;");
         puts("                       a job must match one value of every option given.");
-        puts("  junban ls --summary  Print only the queue totals: cpus BUSY/TOTAL running N queued N");
+        puts("  junban ls --summary  Print only the queue totals: cpus BUSY/TOTAL gpus BUSY/TOTAL running N queued N");
         puts("  junban watch         Live view for a terminal. q quits.");
         puts("  junban kill ID       Stop a running job, or remove a queued one.");
         puts("  junban kill --tag TAG   Do that to every running and queued job tagged TAG.");
@@ -125,11 +127,12 @@ int main(int argc, char **argv)
         puts("");
         puts("Output of ls, meant for scripts:");
         puts("  stdout has one line per job and nothing else; an empty queue prints nothing.");
-        puts("  STATE id=N dir=DIR [tag=TAG] cpus=C TIME [est=DUR [over]] [RESULT] [log=PATH] cmd=COMMAND");
+        puts("  STATE id=N dir=DIR [tag=TAG] cpus=C gpus=G TIME [est=DUR [over]] [RESULT] [log=PATH] cmd=COMMAND");
         puts("  STATE                  running, queued, or done (finished; with -a).");
         puts("  id, dir, cmd           Job ID, directory it was started from, command (always last).");
         puts("  tag, log               The job's tag; output file of a --detach job. Shown when set.");
         puts("  cpus=N, cpus=all(N)    all(N): -c was not given, so the job takes all N CPUs.");
+        puts("  gpus=N                 GPUs the job uses (-g); 0 when not given.");
         puts("  elapsed=, waited=, est=   Time running (waited= while queued), declared estimate.");
         puts("  over                   The job has run longer than its estimate.");
         puts("  exit=N, signal=N, killed, client-lost   RESULT: how a finished job ended.");
@@ -171,6 +174,12 @@ int main(int argc, char **argv)
             if (!strcmp(argv[i], "--estimate")) {
                 if (command_line.estimate || ++i == argc) usage();
                 command_line.estimate = duration(argv[i++], "estimate");
+                continue;
+            }
+            if (!strcmp(argv[i], "-g") || !strcmp(argv[i], "--gpus")) {
+                if (command_line.gpus_given || ++i == argc) usage();
+                command_line.gpus_given = 1;
+                command_line.num_gpus = number(argv[i++], 0);
                 continue;
             }
             if (strcmp(argv[i], "-c") && strcmp(argv[i], "--cpus")) usage();
@@ -258,6 +267,8 @@ int main(int argc, char **argv)
         c_get_max_slots();
         if (command_line.num_slots > command_line.max_slots)
             error("requested CPUs exceed queue total (%d)", command_line.max_slots);
+        if (command_line.num_gpus > command_line.max_gpus)
+            error("requested GPUs exceed queue total (%d)", command_line.max_gpus);
         if (command_line.detach) command_line.log_prefix = c_log_prefix();
         c_new_job();
         command_line.jobid = c_wait_newjob_ok();

@@ -57,8 +57,9 @@ static void draw(const struct Snapshot *snapshot)
     if (window.ws_col) width = window.ws_col;
     if (window.ws_row) height = window.ws_row;
     const char *title = width >= 50 ? "junban  " : "";
-    snprintf(header, sizeof(header), "%scpus %d/%d [] running %d queued %d q:quit",
-             title, snapshot->busy, snapshot->total, snapshot->running, snapshot->queued);
+    snprintf(header, sizeof(header), "%scpus %d/%d [] gpus %d/%d running %d queued %d q:quit",
+             title, snapshot->busy, snapshot->total, snapshot->busy_gpus, snapshot->total_gpus,
+             snapshot->running, snapshot->queued);
     int bars = width - 1 - (int)strlen(header);
     if (bars < 1) bars = 1;
     if (bars > 48) bars = 48;
@@ -66,14 +67,15 @@ static void draw(const struct Snapshot *snapshot)
     for (int i = 0; i < bars; ++i) bar[i] = i < filled ? '#' : '-';
     bar[bars] = 0;
     fputs("\033[H\033[2J", stdout);
-    snprintf(text, sizeof(text), "%scpus %d/%d [%s] running %d queued %d q:quit",
-             title, snapshot->busy, snapshot->total, bar, snapshot->running, snapshot->queued);
+    snprintf(text, sizeof(text), "%scpus %d/%d [%s] gpus %d/%d running %d queued %d q:quit",
+             title, snapshot->busy, snapshot->total, bar, snapshot->busy_gpus,
+             snapshot->total_gpus, snapshot->running, snapshot->queued);
     line(text, "\033[36m", width, &row, height);
     const int states[] = {RUNNING, QUEUED, FINISHED};
     const char *names[] = {"RUNNING", "QUEUED", "DONE"};
     const char *colours[] = {"\033[32m", "\033[33m", "\033[2m"};
     int counts[3] = {0}, shown[3] = {0};
-    int id_width = 2, cpu_width = 4;
+    int id_width = 2, cpu_width = 4, gpu_width = 4;
     for (size_t i = 0; i < snapshot->count; ++i) {
         const struct Job_view *v = &snapshot->jobs[i];
         for (int j = 0; j < 3; ++j) if (v->state == states[j]) ++counts[j];
@@ -99,13 +101,14 @@ static void draw(const struct Snapshot *snapshot)
         int time_width = 7, detail_width = section == 2 ? (width < 50 ? 10 : 11) : 8;
         int dir_width = 16;
         /* Reserve COMMAND first, then shrink DIR only on narrow terminals. */
-        int command_width = width - 1 - (id_width + dir_width + cpu_width + time_width + detail_width + 6);
+        int command_width = width - 1 - (id_width + dir_width + cpu_width + gpu_width +
+                                         time_width + detail_width + 7);
         if (command_width < 7) {
             dir_width -= 7 - command_width;
             if (dir_width < 3) dir_width = 3;
         }
-        snprintf(text, sizeof(text), " %*s %-*s %*s %-*s %-*s COMMAND",
-                 id_width, "ID", dir_width, "DIR", cpu_width, "CPUS", time_width,
+        snprintf(text, sizeof(text), " %*s %-*s %*s %*s %-*s %-*s COMMAND",
+                 id_width, "ID", dir_width, "DIR", cpu_width, "CPUS", gpu_width, "GPUS", time_width,
                  section == 1 ? "WAITED" : "ELAPSED", detail_width, section == 2 ? "RESULT" : "EST");
         line(text, "\033[2m", width, &row, height);
         int count = 0;
@@ -127,8 +130,8 @@ static void draw(const struct Snapshot *snapshot)
                 snprintf(detail, sizeof(detail), "%s%s", estimate, over ? " OVER" : "");
             }
             fit_columns(dir, sizeof(dir), v->label, dir_width, 1);
-            snprintf(text, sizeof(text), " %*d %s %*s %-*s %-*s %s",
-                     id_width, v->jobid, dir, cpu_width, cpus,
+            snprintf(text, sizeof(text), " %*d %s %*s %*d %-*s %-*s %s",
+                     id_width, v->jobid, dir, cpu_width, cpus, gpu_width, v->gpus,
                      time_width, timing, detail_width, detail, v->command);
             line(text, over ? "\033[1;31m" : colours[section], width, &row, height);
             ++count;

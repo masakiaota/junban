@@ -7,12 +7,13 @@
 */
 enum
 {
-    PROTOCOL_VERSION=734
+    PROTOCOL_VERSION=735
 };
 
 /* Retired message numbers and fields are reserved to preserve the 40-byte
  * frame. No retired request has a handler. Version 734 adds the job tag
- * and the detached job's log path to the NEWJOB payload and to Job_view. */
+ * and the detached job's log path to the NEWJOB payload and to Job_view.
+ * Version 735 adds the GPU count of a job and of the queue. */
 enum msg_types
 {
     KILL_SERVER,
@@ -73,6 +74,9 @@ struct Command_line {
     } command;
     char *label;
     int num_slots; /* Zero means all slots, unspecified by caller. */
+    int num_gpus; /* Zero, the default, means the job uses no GPU. */
+    int gpus_given;
+    int max_gpus;
     unsigned long long estimate;
     int list_all;
     int list_summary;
@@ -122,7 +126,7 @@ struct msg
             int reserved_should_keep_finished;
             int label_size;
             int tag_size;
-            int reserved_do_depend;
+            int num_gpus;
             int reserved_depend_on;
             int reserved_wait_enqueuing;
             int num_slots;
@@ -145,10 +149,11 @@ struct msg
         int size;
         int reserved_last_errorlevel;
         int max_slots;
-        /* SNAPSHOT_END: max_slots aliases u.max_slots. */
+        /* SNAPSHOT_END and GET_MAX_SLOTS_OK: max_slots aliases u.max_slots. */
         struct {
             int max_slots;
             int next_jobid;
+            int max_gpus;
         } snapshot_end;
         int version;
     } u;
@@ -167,6 +172,7 @@ struct Job
     char *tag;
     char *log;
     int num_slots;
+    int num_gpus;
     int cpus_unspecified;
     int kill_requested;
     int client_lost;
@@ -180,7 +186,7 @@ struct Job
 /* Bounded display fields keep control characters and unbounded commands off
  * terminals. The server's full original command and label remain in Job. */
 struct Job_view {
-    int jobid, state, cpus, unspecified, killed, client_lost, status, signal;
+    int jobid, state, cpus, gpus, unspecified, killed, client_lost, status, signal;
     double elapsed, waited;
     unsigned long long estimate;
     char label[128];
@@ -190,7 +196,7 @@ struct Job_view {
 };
 
 struct Snapshot {
-    int busy, total, running, queued;
+    int busy, total, busy_gpus, total_gpus, running, queued;
     int next_jobid; /* The ID the next job gets, read with the same listing. */
     size_t count;
     struct Job_view *jobs;

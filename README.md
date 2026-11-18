@@ -4,7 +4,7 @@ English | [日本語](README.ja.md)
 
 junban is a tool for managing compute jobs on a single machine. It is handy when you have several AI agents working on Kaggle or competitive programming at the same time.
 
-- Jobs wait in a queue according to how many CPUs they use. When CPUs are free, several jobs run at once, so the machine is not left idle.
+- Jobs wait in a queue according to how many CPUs and GPUs they use. When they are free, several jobs run at once, so the machine is not left idle.
 - A job with no CPU count never runs alongside another job. Benchmarks that measure run time are not disturbed by other work.
 - You only put `junban run` in front of a command. Input, output, environment variables and the exit status are the same as when you run the command directly.
 
@@ -37,12 +37,29 @@ Without `-c`, the job is treated as using every CPU on the machine. No other job
 $ junban run python eval.py
 ```
 
-If enough CPUs are free, the job starts right away. Otherwise it waits until they are. While it waits, junban shows what is going on:
+### Run a GPU job
+
+Give the number of GPUs a job uses with `-g` (`--gpus`). junban treats the GPU as one device, so `-g` is 0 or 1. Without `-g`, the job uses no GPU. Only one job with `-g 1` runs at a time.
+
+`-c` and `-g` do not change each other's default. `-g 1` alone still takes all CPUs, so the job runs alone. A GPU job that needs little CPU, such as training with MPS or MLX, should give both, so that CPU jobs can run beside it:
+
+```console
+$ junban run -c 1 -g 1 python train_mps.py
+```
+
+| Options | CPUs | GPUs |
+|---|---|---|
+| none | all | 0 |
+| `-c 4` | 4 | 0 |
+| `-c 1 -g 1` | 1 | 1 |
+| `-g 1` | all | 1 |
+
+If enough CPUs are free, the job starts right away. Otherwise it waits until they are. While it waits, junban shows what is going on, including whether it waits for CPUs, GPUs or both:
 
 ```console
 $ junban run python eval.py
-junban: id=1 queued, cpus=all(4), 1 ahead
-junban:   running id=0 dir=demo cpus=1 elapsed=0s est=30m
+junban: id=1 queued, cpus=all(4), gpus=0, 1 ahead, waiting for cpus
+junban:   running id=0 dir=demo cpus=1 gpus=0 elapsed=0s est=30m
 junban: id=1 started after 1s
 ```
 
@@ -95,7 +112,7 @@ The estimate is shown to jobs that are waiting. A job is never stopped for runni
 $ export JUNBAN_TAG=agent-1
 $ junban run -c 4 python train.py
 $ junban ls --tag agent-1
-running id=5 dir=demo tag=agent-1 cpus=4 elapsed=10s cmd=python train.py
+running id=5 dir=demo tag=agent-1 cpus=4 gpus=0 elapsed=10s cmd=python train.py
 $ junban kill --tag agent-1
 ```
 
@@ -107,40 +124,40 @@ $ junban kill --tag agent-1
 
 ```console
 $ junban ls
-running id=0 dir=demo cpus=1 elapsed=1s est=30m cmd=sleep 30
-queued id=1 dir=demo cpus=all(4) waited=1s est=5m cmd=sh -c echo evaluated
+running id=0 dir=demo cpus=1 gpus=0 elapsed=1s est=30m cmd=sleep 30
+queued id=1 dir=demo cpus=all(4) gpus=0 waited=1s est=5m cmd=sh -c echo evaluated
 ```
 
-`dir` is the name of the directory the job was started from. `cpus=all(4)` means the job was started without `-c`. A job that has run past its estimate is marked `over`. To see finished jobs as well, use `junban ls -a`; their lines start with `done`.
+`dir` is the name of the directory the job was started from. `cpus=all(4)` means the job was started without `-c`. `gpus=` is the number given with `-g`, 0 without it. A job that has run past its estimate is marked `over`. To see finished jobs as well, use `junban ls -a`; their lines start with `done`.
 
-Standard output of `junban ls` carries job lines only, and every line starts with the job's state: `running`, `queued` or `done`. When there are no jobs, it prints nothing. Like `grep`, `junban ls` exits with 0 when it listed at least one job, 1 when it listed none, and 125 for junban's own errors. To see how many CPUs are in use, use `junban ls --summary`:
+Standard output of `junban ls` carries job lines only, and every line starts with the job's state: `running`, `queued` or `done`. When there are no jobs, it prints nothing. Like `grep`, `junban ls` exits with 0 when it listed at least one job, 1 when it listed none, and 125 for junban's own errors. To see how many CPUs and GPUs are in use, use `junban ls --summary`:
 
 ```console
 $ junban ls --summary
-cpus 1/4 running 1 queued 1
+cpus 1/4 gpus 0/1 running 1 queued 1
 ```
 
 To list only some jobs, use `--id N` for a job ID, `--dir NAME` for the directory shown as `dir=`, and `--tag TAG` for a tag. Both can be repeated, and they can be combined with each other and with `-a`. The exit status then tells whether any of those jobs is listed:
 
 ```console
 $ junban ls --id 63 --id 64
-running id=63 dir=demo cpus=8 elapsed=5m cmd=python train.py
+running id=63 dir=demo cpus=8 gpus=0 elapsed=5m cmd=python train.py
 $ junban ls -a --dir demo
 ```
 
 For people, `junban watch` is easier to read. The screen refreshes every two seconds. Press `q` to quit.
 
 ```text
-junban  cpus 3/4 [#########################---------] running 1 queued 1 q:quit
+junban  cpus 3/4 [####################-------] gpus 0/1 running 1 queued 1 q:quit
 RUNNING
- ID DIR              CPUS ELAPSED EST      COMMAND
-  1 AHC075-b            3 1s      1s OVER  sleep 30
+ ID DIR              CPUS GPUS ELAPSED EST      COMMAND
+  1 AHC075-b            3    0 1s      1s OVER  sleep 30
 QUEUED
- ID DIR              CPUS WAITED  EST      COMMAND
-  2 AHC075-a          all 1s      5m       true
+ ID DIR              CPUS GPUS WAITED  EST      COMMAND
+  2 AHC075-a          all    0 1s      5m       true
 DONE
- ID DIR              CPUS ELAPSED RESULT      COMMAND
-  0 AHC075-a          all 0s      exit=0      true
+ ID DIR              CPUS GPUS ELAPSED RESULT      COMMAND
+  0 AHC075-a          all    0 0s      exit=0      true
 ```
 
 ### Stop a job
@@ -155,7 +172,7 @@ If you interrupt `junban run` itself, with Ctrl-C for example, the command it is
 
 ## Good to know
 
-- Jobs start in the order they were submitted. Until the CPUs needed by the first job in the queue are free, the jobs behind it do not start. This keeps a large job from waiting forever while small jobs keep going ahead of it.
+- Jobs start in the order they were submitted, for each of CPUs and GPUs. A waiting job holds on to the CPUs and GPUs it asks for, so a job behind it starts only if it fits in what is left. A CPU job can therefore start while a GPU job ahead of it waits for the GPU, but never takes a CPU that job is waiting for. A job that needs all CPUs holds them all, so nothing behind it starts first. This keeps a large job from waiting forever while small jobs keep going ahead of it.
 - `junban run a && b` puts only `a` in the queue. To queue both, write `junban run sh -c 'a && b'`.
 - You cannot call `junban run` from inside a job that junban is running. It fails with an error (exit status 125). This keeps a job from waiting for itself and blocking the queue.
 - If a command exits and leaves child processes running in the background, `junban run` does not return until they finish.
@@ -170,6 +187,7 @@ Put something like this in `AGENTS.md` or `CLAUDE.md`:
 - Always run long computations through junban run.
 - Give the number of CPUs with -c, counting threads and child processes.
 - Run benchmarks that measure run time without -c.
+- Give -g 1 to jobs that use the GPU. Give -c as well, for example -c 1 -g 1.
 - When you can guess how long a job will take, say so with --estimate.
 - junban run in the foreground does not return until the job ends. To run jobs
   in parallel, start each with id=$(junban run --detach ...) and pass the IDs
@@ -184,7 +202,8 @@ If each agent session sets its own `JUNBAN_TAG` (for example `export JUNBAN_TAG=
 
 - junban is meant for one person using one machine. It does not coordinate with other users' jobs.
 - It cannot manage work that is not started through junban. Such work can still run at the same time as a benchmark.
-- The CPU count given with `-c` is taken on trust. A job that uses more is not restricted. Memory and GPUs are not managed.
+- The CPU and GPU counts given with `-c` and `-g` are taken on trust. A job that uses more is not restricted. Memory is not managed.
+- The GPU is managed as one device. junban does not detect GPUs or assign a GPU to a job, so on a machine with several GPUs it still runs one `-g 1` job at a time.
 - If the junban server stops, waiting jobs end with an error (exit status 125). Commands that are already running keep running.
 - It handles up to 995 jobs at a time, running and waiting combined.
 - Some sandbox settings prevent junban from reaching its server. In that case it reports an error and does not run the command.

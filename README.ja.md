@@ -4,7 +4,7 @@
 
 junban は、1台のマシンで計算ジョブを管理するためのツールです。複数のAIエージェントで Kaggle や競技プログラミングをするときに便利です。
 
-- ジョブを、使用するCPU数に応じて待ち行列に並べます。CPUが空いていれば複数のジョブを同時に実行するので、マシンを無駄なく使えます。
+- ジョブを、使用するCPU数とGPU数に応じて待ち行列に並べます。空いていれば複数のジョブを同時に実行するので、マシンを無駄なく使えます。
 - CPU数を指定しなかったジョブは、ほかのジョブと同時には実行されません。そのため、実行時間を測る評価がほかの計算の影響でブレることがありません。
 - コマンドの前に `junban run` を付けるだけで使えます。入出力、環境変数、終了コードは、コマンドを直接実行したときと同じです。
 
@@ -37,12 +37,29 @@ $ junban run -c 4 python train.py
 $ junban run python eval.py
 ```
 
-CPUが空いていれば、ジョブはすぐに始まります。空いていなければ、空くまで待ちます。待っている間は、次のように状況が表示されます。
+### GPUを使うジョブを実行する
+
+ジョブが使うGPU数は `-g`（`--gpus`）で指定します。junban はGPUを1台の装置として扱うので、指定できるのは 0 か 1 です。`-g` を省略すると、GPUを使わないジョブとして扱われます。`-g 1` のジョブは一度に1つしか実行されません。
+
+`-c` と `-g` は、互いの省略時の値を変えません。`-g 1` だけを付けたジョブは全CPUも使うので、ほかのジョブとは同時に実行されません。MPS や MLX を使った学習のように、CPUをあまり使わないGPUジョブには両方を指定してください。そうすれば、CPUジョブを横で同時に実行できます。
+
+```console
+$ junban run -c 1 -g 1 python train_mps.py
+```
+
+| オプション | CPU | GPU |
+|---|---|---|
+| なし | 全部 | 0 |
+| `-c 4` | 4 | 0 |
+| `-c 1 -g 1` | 1 | 1 |
+| `-g 1` | 全部 | 1 |
+
+CPUが空いていれば、ジョブはすぐに始まります。空いていなければ、空くまで待ちます。待っている間は、CPUとGPUのどちらを待っているかも含めて、次のように状況が表示されます。
 
 ```console
 $ junban run python eval.py
-junban: id=1 queued, cpus=all(4), 1 ahead
-junban:   running id=0 dir=demo cpus=1 elapsed=0s est=30m
+junban: id=1 queued, cpus=all(4), gpus=0, 1 ahead, waiting for cpus
+junban:   running id=0 dir=demo cpus=1 gpus=0 elapsed=0s est=30m
 junban: id=1 started after 1s
 ```
 
@@ -95,7 +112,7 @@ $ junban run -c 8 --estimate 2h python train.py
 $ export JUNBAN_TAG=agent-1
 $ junban run -c 4 python train.py
 $ junban ls --tag agent-1
-running id=5 dir=demo tag=agent-1 cpus=4 elapsed=10s cmd=python train.py
+running id=5 dir=demo tag=agent-1 cpus=4 gpus=0 elapsed=10s cmd=python train.py
 $ junban kill --tag agent-1
 ```
 
@@ -107,40 +124,40 @@ $ junban kill --tag agent-1
 
 ```console
 $ junban ls
-running id=0 dir=demo cpus=1 elapsed=1s est=30m cmd=sleep 30
-queued id=1 dir=demo cpus=all(4) waited=1s est=5m cmd=sh -c echo evaluated
+running id=0 dir=demo cpus=1 gpus=0 elapsed=1s est=30m cmd=sleep 30
+queued id=1 dir=demo cpus=all(4) gpus=0 waited=1s est=5m cmd=sh -c echo evaluated
 ```
 
-`dir` は、ジョブを投入したディレクトリの名前です。`cpus=all(4)` は、`-c` を省略したジョブです。見込みの時間を過ぎたジョブには `over` と表示されます。終わったジョブも見たいときは `junban ls -a` を使います。終わったジョブの行は `done` で始まります。
+`dir` は、ジョブを投入したディレクトリの名前です。`cpus=all(4)` は、`-c` を省略したジョブです。`gpus=` は `-g` で指定したGPU数で、省略したときは 0 です。見込みの時間を過ぎたジョブには `over` と表示されます。終わったジョブも見たいときは `junban ls -a` を使います。終わったジョブの行は `done` で始まります。
 
-`junban ls` の標準出力には、ジョブの行だけが出ます。どの行も、ジョブの状態（`running`、`queued`、`done`）で始まります。ジョブがないときは何も出力しません。終了コードは `grep` と同じく、ジョブを1件以上表示したときは 0、1件もなかったときは 1、junban 自身のエラーのときは 125 です。CPUの使用状況を見たいときは `junban ls --summary` を使います。
+`junban ls` の標準出力には、ジョブの行だけが出ます。どの行も、ジョブの状態（`running`、`queued`、`done`）で始まります。ジョブがないときは何も出力しません。終了コードは `grep` と同じく、ジョブを1件以上表示したときは 0、1件もなかったときは 1、junban 自身のエラーのときは 125 です。CPUとGPUの使用状況を見たいときは `junban ls --summary` を使います。
 
 ```console
 $ junban ls --summary
-cpus 1/4 running 1 queued 1
+cpus 1/4 gpus 0/1 running 1 queued 1
 ```
 
 一部のジョブだけを表示したいときは、ジョブIDを `--id N` で、ディレクトリ（`dir=` の名前）を `--dir NAME` で、タグを `--tag TAG` で指定します。どちらも繰り返し指定でき、互いに、また `-a` とも組み合わせられます。このときの終了コードは、指定したジョブが表示されたかどうかを表します。
 
 ```console
 $ junban ls --id 63 --id 64
-running id=63 dir=demo cpus=8 elapsed=5m cmd=python train.py
+running id=63 dir=demo cpus=8 gpus=0 elapsed=5m cmd=python train.py
 $ junban ls -a --dir demo
 ```
 
 人間が見るときは `junban watch` が便利です。画面が2秒ごとに更新されます。`q` で終了します。
 
 ```text
-junban  cpus 3/4 [#########################---------] running 1 queued 1 q:quit
+junban  cpus 3/4 [####################-------] gpus 0/1 running 1 queued 1 q:quit
 RUNNING
- ID DIR              CPUS ELAPSED EST      COMMAND
-  1 AHC075-b            3 1s      1s OVER  sleep 30
+ ID DIR              CPUS GPUS ELAPSED EST      COMMAND
+  1 AHC075-b            3    0 1s      1s OVER  sleep 30
 QUEUED
- ID DIR              CPUS WAITED  EST      COMMAND
-  2 AHC075-a          all 1s      5m       true
+ ID DIR              CPUS GPUS WAITED  EST      COMMAND
+  2 AHC075-a          all    0 1s      5m       true
 DONE
- ID DIR              CPUS ELAPSED RESULT      COMMAND
-  0 AHC075-a          all 0s      exit=0      true
+ ID DIR              CPUS GPUS ELAPSED RESULT      COMMAND
+  0 AHC075-a          all    0 0s      exit=0      true
 ```
 
 ### ジョブを止める
@@ -155,7 +172,7 @@ $ junban kill 0
 
 ## 知っておくとよいこと
 
-- ジョブは投入した順に始まります。先頭のジョブに必要なCPUが空くまで、後ろのジョブは始まりません。小さいジョブが先に実行され続けて、大きいジョブがいつまでも始まらない、ということが起きないようにするためです。
+- ジョブは、CPUとGPUのそれぞれについて投入した順に始まります。待っているジョブは、自分に必要なCPUとGPUを押さえます。後ろのジョブは、その残りに収まるときだけ始まります。そのため、GPUを待つジョブの後ろにいるCPUジョブは先に始まれますが、前のジョブが待っているCPUを使うことはありません。全CPUを使うジョブが待っていれば全CPUが押さえられるので、後ろのジョブが先に始まることはありません。小さいジョブが先に実行され続けて、大きいジョブがいつまでも始まらない、ということが起きないようにするためです。
 - `junban run a && b` と書くと、待ち行列に入るのは `a` だけです。まとめて入れたいときは `junban run sh -c 'a && b'` と書きます。
 - junban で実行しているジョブの中から `junban run` を呼ぶことはできません。呼ぶとエラー（終了コード 125）になります。ジョブが自分自身の終了を待ち続けて、待ち行列が止まるのを防ぐためです。
 - 子プロセスをバックグラウンドに残して終了するコマンドでは、子プロセスが終わるまで `junban run` も終了しません。
@@ -169,6 +186,7 @@ $ junban kill 0
 ```text
 - 時間のかかる計算は、必ず junban run を付けて実行する。
 - 使用するCPU数を -c で正しく指定する。スレッドや子プロセスの分も含める。
+- GPUを使うジョブには -g 1 を付ける。-c も合わせて指定する（例：-c 1 -g 1）。
 - 実行時間を測る評価は、-c を付けずに実行する。
 - かかる時間の見当がつくときは --estimate で伝える。
 - junban run を前景で実行すれば、ジョブの終了まで戻らない。並列にするときは、
@@ -184,7 +202,8 @@ $ junban kill 0
 
 - 1台のマシンを1人で使うことを想定しています。ほかのユーザーのジョブとは調整しません。
 - junban を通さずに実行した計算は管理できません。評価と同時に動いても防げません。
-- `-c` で指定したCPU数は自己申告です。指定より多く使っても制限されません。メモリとGPUは管理しません。
+- `-c` と `-g` で指定したCPU数とGPU数は自己申告です。指定より多く使っても制限されません。メモリは管理しません。
+- GPUは1台の装置として管理します。junban はGPUを検出せず、ジョブにGPUを割り当てることもしません。そのため、GPUが複数あるマシンでも `-g 1` のジョブは1つずつ実行されます。
 - junban のサーバーが止まると、待っていたジョブはエラー（終了コード 125）で終了します。実行中のコマンドはそのまま動き続けます。
 - 同時に扱えるジョブは、実行中と待機中を合わせて995個までです。
 - サンドボックスの設定によっては、junban のサーバーに接続できないことがあります。その場合はエラーになり、コマンドは実行されません。

@@ -131,8 +131,10 @@ class Queue:
     def wait_rows(self, count):
         return eventually(lambda: (r if len(r := self.rows()) == count else None))
 
-    def start(self, name, cpus=None, tree=False, estimate=None, **kwargs):
+    def start(self, name, cpus=None, tree=False, estimate=None, gpus=None, **kwargs):
         args = ["run"] + (["-c", str(cpus)] if cpus else [])
+        if gpus is not None:
+            args += ["-g", str(gpus)]
         if estimate:
             args += ["--estimate", estimate]
         p = self.popen(*args, PY, WORKER, "tree" if tree else "hold",
@@ -314,7 +316,8 @@ class QueueTests(unittest.TestCase):
                 self.assertEqual(code, 0)
                 self.assertTrue(out)
                 self.assertEqual(err, b"")
-            for opts in (["-c", "4"], ["--cpus", "4"], ["--"], []):
+            for opts in (["-c", "4"], ["--cpus", "4"], ["-g", "1"], ["--gpus", "0"],
+                         ["-c", "1", "-g", "1"], ["--"], []):
                 self.assertEqual(q.call("run", *opts, PY, "-c", "print(1)"),
                                  (0, b"1\n", b""))
             self.assertEqual(q.rows(), [])
@@ -345,6 +348,78 @@ class QueueTests(unittest.TestCase):
             q.pids("c")
             q.release("c")
             self.assertEqual(c.wait(timeout=3), 0)
+
+    def test_gpu_options(self):
+        with Queue() as q:
+            for value in ("x", "-1", "1x", ""):
+                self.own_failure(q.call("run", "-g", value, "true"))
+            for args in (["-g", "1", "-g", "1"], ["--gpus", "0", "-g", "0"], ["-g"]):
+                self.own_failure(q.call("run", *args, "true"))
+            self.assertFalse((q.path / "s").exists())
+            self.own_failure(q.call("run", "-g", "2", "true"), "GPUs")
+            self.own_failure(q.call("run", "--detach", "-c", "1", "-g", "2", "true"), "GPUs")
+            # Each option sets only its own resource.
+            a = q.start("a", gpus=1)
+            q.pids("a")
+            self.assertRegex(q.call("ls")[1].decode(),
+                             r"^running id=0 dir=\S+ cpus=all\(4\) gpus=1 elapsed=")
+            self.assertEqual(q.call("ls", "--summary"),
+                             (0, b"cpus 4/4 gpus 1/1 running 1 queued 0\n", b""))
+            q.release("a")
+            self.assertEqual(a.wait(timeout=3), 0)
+            b = q.start("b", 2)
+            q.pids("b")
+            self.assertRegex(q.call("ls")[1].decode(), r"^running id=1 dir=\S+ cpus=2 gpus=0 ")
+            q.release("b")
+            self.assertEqual(b.wait(timeout=3), 0)
+
+    def test_per_resource_fifo(self):
+        with Queue(4) as q:
+            def states():
+                return dict(q.rows())
+            g1 = q.start("g1", 1, gpus=1)
+            q.pids("g1")
+            env = dict(q.env, JUNBAN_NOTIFY_SEC="60")
+            g2 = q.start("g2", 1, gpus=1, env=env)
+            notice = read_until(g2.stderr, lambda data: b"ahead" in data)
+            self.assertIn(b"id=1 queued, cpus=1, gpus=1, 1 ahead, waiting for gpus", notice)
+            # A CPU job passes a job that waits only for the GPU.
+            c = q.start("c", 2)
+            q.pids("c")
+            self.assertEqual(states(), {0: "running", 1: "queued", 2: "running"})
+            self.assertEqual(q.call("ls", "--summary"),
+                             (0, b"cpus 3/4 gpus 1/1 running 2 queued 1\n", b""))
+            # g2 reserves the last free CPU, so a later one-CPU job waits.
+            d = q.start("d", 1)
+            q.wait_rows(4)
+            time.sleep(0.15)
+            self.assertFalse((q.path / "d.pids").exists())
+            q.release("g1")
+            self.assertEqual(g1.wait(timeout=3), 0)
+            q.pids("g2")
+            self.assertEqual(states(), {1: "running", 2: "running", 3: "queued"})
+            q.release("c")
+            self.assertEqual(c.wait(timeout=3), 0)
+            q.pids("d")
+            # A job that needs all CPUs keeps everything behind it waiting,
+            # GPU jobs too, so it cannot starve.
+            e = q.start("e")
+            q.wait_rows(3)
+            f = q.start("f", 1, gpus=1)
+            q.wait_rows(4)
+            time.sleep(0.15)
+            self.assertFalse((q.path / "f.pids").exists())
+            q.release("g2")
+            q.release("d")
+            self.assertEqual(g2.wait(timeout=3), 0)
+            self.assertEqual(d.wait(timeout=3), 0)
+            q.pids("e")
+            self.assertFalse((q.path / "f.pids").exists())
+            q.release("e")
+            self.assertEqual(e.wait(timeout=3), 0)
+            q.pids("f")
+            q.release("f")
+            self.assertEqual(f.wait(timeout=3), 0)
 
     def test_parallel_slots(self):
         with Queue() as q:
@@ -735,13 +810,13 @@ class VisibilityOnlyTests(unittest.TestCase):
             # Agents read --help first: it must say how ls lines look and how to wait.
             text = q.call("help")[1].decode()
             for phrase in ("stdout has one line per job and nothing else",
-                           "STATE id=N dir=DIR [tag=TAG] cpus=C",
+                           "STATE id=N dir=DIR [tag=TAG] cpus=C gpus=G",
                            "junban wait ID...", "Do not loop over the output of junban ls",
                            "ls     0 if it listed a job, 1 if it listed none"):
                 self.assertIn(phrase, text)
             self.assertLessEqual(max(map(len, text.splitlines())), 100)
             self.assertEqual(q.call("version")[1], b"junban 0.1.1 (based on task-spooler 1.0.4)\n")
-            self.assertEqual(q.call("ls", "--summary"), (0, b"cpus 0/4 running 0 queued 0\n", b""))
+            self.assertEqual(q.call("ls", "--summary"), (0, b"cpus 0/4 gpus 0/1 running 0 queued 0\n", b""))
             for args in (["--summary", "-a"], ["-a", "-a"], ["--summary", "--summary"]):
                 self.own_failure(q.call("ls", *args))
             self.assertEqual(q.call("run", "sh", "-c", "printf OUT; printf ERR >&2"),
@@ -832,7 +907,7 @@ class VisibilityOnlyTests(unittest.TestCase):
             self.assertEqual(listed(), [(0, "agent-1"), (1, "other"), (2, None),
                                         (3, "agent-1"), (4, "agent-1")])
             self.assertRegex(q.call("ls", "--id", "0")[1].decode(),
-                             r"^running id=0 dir=\S+ tag=agent-1 cpus=1 elapsed=\d+s cmd=")
+                             r"^running id=0 dir=\S+ tag=agent-1 cpus=1 gpus=0 elapsed=\d+s cmd=")
             self.assertEqual(listed("--tag", "agent-1"), [(0, "agent-1"), (3, "agent-1"), (4, "agent-1")])
             self.assertEqual(listed("--tag", "agent-1", "--tag", "other"),
                              [(0, "agent-1"), (1, "other"), (3, "agent-1"), (4, "agent-1")])
@@ -1258,7 +1333,7 @@ class VisibilityOnlyTests(unittest.TestCase):
             self.assertEqual(short, [])
             self.assertEqual([int(line.split()[1].split("=")[1]) for line in full], list(range(24, 4, -1)))
             for i, line in zip(range(24, 4, -1), full):
-                self.assertRegex(line, r"^done id=%d dir=\S+ cpus=all\(4\) elapsed=\d+s exit=%d cmd=sh -c exit %d$"
+                self.assertRegex(line, r"^done id=%d dir=\S+ cpus=all\(4\) gpus=0 elapsed=\d+s exit=%d cmd=sh -c exit %d$"
                                  % (i, i % 8, i % 8))
             self.own_failure(q.call("kill", "24"), "unknown")
             self.own_failure(q.call("kill", "9999"), "unknown")
@@ -1273,11 +1348,11 @@ class VisibilityOnlyTests(unittest.TestCase):
             later = q.start("later", 1)
             q.wait_rows(3)
             lines = self.listing(q)
-            self.assertEqual(q.call("ls", "--summary"), (0, b"cpus 3/4 running 1 queued 2\n", b""))
+            self.assertEqual(q.call("ls", "--summary"), (0, b"cpus 3/4 gpus 0/1 running 1 queued 2\n", b""))
             self.assertEqual(len(lines), 3)
-            self.assertRegex(lines[0], r"^running id=0 dir=\S+ cpus=3 elapsed=\d+s est=1s(?: over)? cmd=.+")
-            self.assertRegex(lines[1], r"^queued id=1 dir=\S+ cpus=all\(4\) waited=\d+s est=2m cmd=.+")
-            self.assertRegex(lines[2], r"^queued id=2 dir=\S+ cpus=1 waited=\d+s cmd=.+")
+            self.assertRegex(lines[0], r"^running id=0 dir=\S+ cpus=3 gpus=0 elapsed=\d+s est=1s(?: over)? cmd=.+")
+            self.assertRegex(lines[1], r"^queued id=1 dir=\S+ cpus=all\(4\) gpus=0 waited=\d+s est=2m cmd=.+")
+            self.assertRegex(lines[2], r"^queued id=2 dir=\S+ cpus=1 gpus=0 waited=\d+s cmd=.+")
             self.assertLessEqual(len(lines[0].split(" cmd=", 1)[1]), 80)
             eventually(lambda: " over " in self.listing(q)[0])
             self.assertIsNone(p.poll(), "estimate must never stop the job")
@@ -1286,7 +1361,7 @@ class VisibilityOnlyTests(unittest.TestCase):
             out, err = waiting.communicate(timeout=3)
             self.own_failure((waiting.returncode, out, err), "removed")
             q.pids("later")
-            self.assertTrue(any(re.match(r"done id=1 dir=\S+ cpus=all\(4\) elapsed=0s est=2m killed cmd=", line)
+            self.assertTrue(any(re.match(r"done id=1 dir=\S+ cpus=all\(4\) gpus=0 elapsed=0s est=2m killed cmd=", line)
                                 for line in self.listing(q, True)))
             self.assertEqual(q.call("kill", "0"), (0, b"", b""))
             self.assertEqual(p.wait(timeout=3), 143)
@@ -1309,9 +1384,9 @@ class VisibilityOnlyTests(unittest.TestCase):
             waiting = q.start("waiting", env=env)
             output = read_until(waiting.stderr, lambda data: len(data.splitlines()) >= 6)
             lines = output.splitlines()
-            self.assertIn(b"id=3 queued, cpus=all(4), 2 ahead", lines[0])
-            self.assertRegex(lines[1], rb"^junban:   running id=1 dir=\S+ cpus=1 elapsed=\d+s$")
-            self.assertRegex(lines[2], rb"^junban:   running id=2 dir=\S+ cpus=1 elapsed=\d+s est=30m$")
+            self.assertIn(b"id=3 queued, cpus=all(4), gpus=0, 2 ahead, waiting for cpus", lines[0])
+            self.assertRegex(lines[1], rb"^junban:   running id=1 dir=\S+ cpus=1 gpus=0 elapsed=\d+s$")
+            self.assertRegex(lines[2], rb"^junban:   running id=2 dir=\S+ cpus=1 gpus=0 elapsed=\d+s est=30m$")
             self.assertEqual(lines[0], lines[3])
             q.release("a")
             q.release("b")
