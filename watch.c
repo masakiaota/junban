@@ -56,14 +56,20 @@ static void draw(const struct Snapshot *snapshot)
     ioctl(STDOUT_FILENO, TIOCGWINSZ, &window);
     if (window.ws_col) width = window.ws_col;
     if (window.ws_row) height = window.ws_row;
-    /* Narrow terminals drop the title and the GPU fields so q:quit and
-     * COMMAND keep their room; junban ls still shows gpus=. */
+    /* Narrow terminals drop the GPUS column so COMMAND keeps its room, and
+     * the header drops the title, then the GPU totals, until q:quit fits
+     * with at least a one-character bar. junban ls still shows gpus=. */
     const int wide = width >= 50;
-    const char *title = wide ? "junban  " : "";
-    char gpus[32] = "";
-    if (wide) snprintf(gpus, sizeof(gpus), "gpus %d/%d ", snapshot->busy_gpus, snapshot->total_gpus);
-    snprintf(header, sizeof(header), "%scpus %d/%d [] %srunning %d queued %d q:quit",
-             title, snapshot->busy, snapshot->total, gpus, snapshot->running, snapshot->queued);
+    const char *title = "junban  ";
+    char gpus[32];
+    snprintf(gpus, sizeof(gpus), "gpus %d/%d ", snapshot->busy_gpus, snapshot->total_gpus);
+    for (;;) {
+        snprintf(header, sizeof(header), "%scpus %d/%d [] %srunning %d queued %d q:quit",
+                 title, snapshot->busy, snapshot->total, gpus, snapshot->running, snapshot->queued);
+        if ((int)strlen(header) + 1 <= width - 1 || (!*title && !*gpus)) break;
+        if (*title) title = "";
+        else gpus[0] = 0;
+    }
     int bars = width - 1 - (int)strlen(header);
     if (bars < 1) bars = 1;
     if (bars > 48) bars = 48;
