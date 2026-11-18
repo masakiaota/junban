@@ -148,7 +148,7 @@ int main(int argc, char **argv)
     }
     if (!strcmp(argv[1], "version") || !strcmp(argv[1], "--version")) {
         if (argc != 2) usage();
-        puts("junban 0.1.1 (based on task-spooler 1.0.4)");
+        puts("junban 0.2.0 (based on task-spooler 1.0.4)");
         return 0;
     }
     if (!strcmp(argv[1], "run")) {
