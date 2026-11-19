@@ -89,6 +89,7 @@ void c_new_job()
     m.u.newjob.tag_size = command_line.tag ? strlen(command_line.tag) + 1 : 0;
     m.u.newjob.log_size = command_line.log_prefix ? strlen(command_line.log_prefix) + 1 : 0;
     m.u.newjob.num_slots = command_line.num_slots;
+    m.u.newjob.num_gpus = command_line.num_gpus;
 
     /* Send the message */
     send_msg(server_socket, &m);
@@ -557,7 +558,8 @@ void c_get_max_slots()
     switch(m.type)
     {
         case GET_MAX_SLOTS_OK:
-            command_line.max_slots = m.u.max_slots;
+            command_line.max_slots = m.u.snapshot_end.max_slots;
+            command_line.max_gpus = m.u.snapshot_end.max_gpus;
             return;
         default:
             warning("Wrong internal message in get_max_slots");

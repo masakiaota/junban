@@ -65,6 +65,7 @@ static int max_descriptors;
 /* in jobs.c */
 extern int max_jobs;
 extern int max_slots;
+extern int max_gpus;
 
 static void s_send_version(int s)
 {
@@ -346,7 +347,8 @@ static enum Break
                 m.u.newjob.label_size < 0 || m.u.newjob.label_size > 4096 ||
                 m.u.newjob.tag_size < 0 || m.u.newjob.tag_size > 64 ||
                 m.u.newjob.log_size < 0 || m.u.newjob.log_size > 4096 ||
-                m.u.newjob.num_slots > max_slots)
+                m.u.newjob.num_slots > max_slots ||
+                m.u.newjob.num_gpus < 0 || m.u.newjob.num_gpus > max_gpus)
                 return CLOSE;
             client_cs[index].jobid = s_newjob(s, &m);
             if (client_cs[index].jobid < 0) return CLOSE;

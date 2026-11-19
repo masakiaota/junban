@@ -131,8 +131,12 @@ class Queue:
     def wait_rows(self, count):
         return eventually(lambda: (r if len(r := self.rows()) == count else None))
 
-    def start(self, name, cpus=None, tree=False, estimate=None, **kwargs):
+    def start(self, name, cpus=None, tree=False, estimate=None, gpus=None, tag=None, **kwargs):
         args = ["run"] + (["-c", str(cpus)] if cpus else [])
+        if tag:
+            args += ["--tag", tag]
+        if gpus is not None:
+            args += ["-g", str(gpus)]
         if estimate:
             args += ["--estimate", estimate]
         p = self.popen(*args, PY, WORKER, "tree" if tree else "hold",
@@ -314,7 +318,8 @@ class QueueTests(unittest.TestCase):
                 self.assertEqual(code, 0)
                 self.assertTrue(out)
                 self.assertEqual(err, b"")
-            for opts in (["-c", "4"], ["--cpus", "4"], ["--"], []):
+            for opts in (["-c", "4"], ["--cpus", "4"], ["-g", "1"], ["--gpus", "0"],
+                         ["-c", "1", "-g", "1"], ["--"], []):
                 self.assertEqual(q.call("run", *opts, PY, "-c", "print(1)"),
                                  (0, b"1\n", b""))
             self.assertEqual(q.rows(), [])
@@ -345,6 +350,86 @@ class QueueTests(unittest.TestCase):
             q.pids("c")
             q.release("c")
             self.assertEqual(c.wait(timeout=3), 0)
+
+    def test_gpu_options(self):
+        with Queue() as q:
+            for value in ("x", "-1", "1x", ""):
+                self.own_failure(q.call("run", "-g", value, "true"))
+            for args in (["-g", "1", "-g", "1"], ["--gpus", "0", "-g", "0"], ["-g"]):
+                self.own_failure(q.call("run", *args, "true"))
+            self.assertFalse((q.path / "s").exists())
+            self.own_failure(q.call("run", "-g", "2", "true"), "GPUs")
+            self.own_failure(q.call("run", "--detach", "-c", "1", "-g", "2", "true"), "GPUs")
+            # Each option sets only its own resource.
+            a = q.start("a", gpus=1)
+            q.pids("a")
+            self.assertRegex(q.call("ls")[1].decode(),
+                             r"^running id=0 dir=\S+ cpus=all\(4\) gpus=1 elapsed=")
+            self.assertEqual(q.call("ls", "--summary"),
+                             (0, b"cpus 4/4 gpus 1/1 running 1 queued 0\n", b""))
+            q.release("a")
+            self.assertEqual(a.wait(timeout=3), 0)
+            b = q.start("b", 2)
+            q.pids("b")
+            self.assertRegex(q.call("ls")[1].decode(), r"^running id=1 dir=\S+ cpus=2 gpus=0 ")
+            q.release("b")
+            self.assertEqual(b.wait(timeout=3), 0)
+
+    def test_per_resource_fifo(self):
+        with Queue(4) as q:
+            def states():
+                return dict(q.rows())
+            g1 = q.start("g1", 1, gpus=1)
+            q.pids("g1")
+            env = dict(q.env, JUNBAN_NOTIFY_SEC="60")
+            g2 = q.start("g2", 1, gpus=1, env=env)
+            notice = read_until(g2.stderr, lambda data: b"ahead" in data)
+            self.assertIn(b"id=1 queued, cpus=1, gpus=1, 1 ahead, waiting for gpus", notice)
+            # A CPU job passes a job that waits only for the GPU.
+            c = q.start("c", 2)
+            q.pids("c")
+            self.assertEqual(states(), {0: "running", 1: "queued", 2: "running"})
+            self.assertEqual(q.call("ls", "--summary"),
+                             (0, b"cpus 3/4 gpus 1/1 running 2 queued 1\n", b""))
+            # g2 reserves the last free CPU, so a later one-CPU job waits.
+            d = q.start("d", 1)
+            q.wait_rows(4)
+            time.sleep(0.15)
+            self.assertFalse((q.path / "d.pids").exists())
+            q.release("g1")
+            self.assertEqual(g1.wait(timeout=3), 0)
+            # g2 starts and its reservation goes, so d takes the last CPU.
+            q.pids("g2")
+            q.pids("d")
+            self.assertEqual(states(), {1: "running", 2: "running", 3: "running"})
+            q.release("g2")
+            self.assertEqual(g2.wait(timeout=3), 0)
+            # A job that needs all CPUs keeps everything behind it waiting,
+            # GPU jobs too, so it cannot starve.
+            e = q.start("e")
+            q.wait_rows(3)
+            f = q.start("f", 1, gpus=1, env=env)
+            notice = read_until(f.stderr, lambda data: b"ahead" in data)
+            self.assertIn(b"id=5 queued, cpus=1, gpus=1, 3 ahead, waiting for cpus", notice)
+            h = q.start("h", 1, gpus=1, env=env)
+            notice = read_until(h.stderr, lambda data: b"ahead" in data)
+            self.assertIn(b"id=6 queued, cpus=1, gpus=1, 4 ahead, waiting for cpus and gpus", notice)
+            q.release("c")
+            q.release("d")
+            self.assertEqual(c.wait(timeout=3), 0)
+            self.assertEqual(d.wait(timeout=3), 0)
+            q.pids("e")
+            self.assertEqual(states(), {4: "running", 5: "queued", 6: "queued"})
+            q.release("e")
+            self.assertEqual(e.wait(timeout=3), 0)
+            q.pids("f")
+            time.sleep(0.15)
+            self.assertFalse((q.path / "h.pids").exists())
+            q.release("f")
+            self.assertEqual(f.wait(timeout=3), 0)
+            q.pids("h")
+            q.release("h")
+            self.assertEqual(h.wait(timeout=3), 0)
 
     def test_parallel_slots(self):
         with Queue() as q:
@@ -706,6 +791,39 @@ def caffeinates(server):
     return found
 
 
+def watch_screen(q, columns, rows, condition, env=None):
+    """Run junban watch on a PTY of the given size; return its output."""
+    master, slave = pty.openpty()
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
+    def controlling_terminal():
+        os.setsid()
+        fcntl.ioctl(0, termios.TIOCSCTTY, 0)
+        os.tcsetpgrp(0, os.getpgrp())
+    try:
+        p = subprocess.Popen([BIN, "watch"], cwd=q.path, env=env or q.env, stdin=slave,
+                             stdout=slave, stderr=slave, preexec_fn=controlling_terminal)
+        q.clients.append(p)
+        screen = read_until(master, condition)
+        # Finish the redraw in progress; the next one is two seconds away.
+        while select.select([master], [], [], 0.3)[0]:
+            screen += os.read(master, 65536)
+        p.terminate()
+        end = time.monotonic() + 3
+        while p.poll() is None and time.monotonic() < end:
+            if select.select([master], [], [], 0.05)[0]:
+                os.read(master, 65536)
+        assert p.wait(timeout=1) == 0
+    finally:
+        os.close(master)
+        os.close(slave)
+    # Keep only the last full redraw.
+    return screen.rsplit(b"\x1b[H\x1b[2J", 1)[-1]
+
+
+def plain(screen):
+    return re.sub(rb"\x1b\[[0-?]*[ -/]*[@-~]", b"", screen).decode().replace("\r", "")
+
+
 def terminal_modes(fd):
     modes = termios.tcgetattr(fd)
     # PENDIN describes pending kernel input reprocessing, not configuration.
@@ -735,13 +853,13 @@ class VisibilityOnlyTests(unittest.TestCase):
             # Agents read --help first: it must say how ls lines look and how to wait.
             text = q.call("help")[1].decode()
             for phrase in ("stdout has one line per job and nothing else",
-                           "STATE id=N dir=DIR [tag=TAG] cpus=C",
+                           "STATE id=N dir=DIR [tag=TAG] cpus=C gpus=G",
                            "junban wait ID...", "Do not loop over the output of junban ls",
                            "ls     0 if it listed a job, 1 if it listed none"):
                 self.assertIn(phrase, text)
             self.assertLessEqual(max(map(len, text.splitlines())), 100)
-            self.assertEqual(q.call("version")[1], b"junban 0.1.1 (based on task-spooler 1.0.4)\n")
-            self.assertEqual(q.call("ls", "--summary"), (0, b"cpus 0/4 running 0 queued 0\n", b""))
+            self.assertEqual(q.call("version")[1], b"junban 0.2.0 (based on task-spooler 1.0.4)\n")
+            self.assertEqual(q.call("ls", "--summary"), (0, b"cpus 0/4 gpus 0/1 running 0 queued 0\n", b""))
             for args in (["--summary", "-a"], ["-a", "-a"], ["--summary", "--summary"]):
                 self.own_failure(q.call("ls", *args))
             self.assertEqual(q.call("run", "sh", "-c", "printf OUT; printf ERR >&2"),
@@ -832,7 +950,7 @@ class VisibilityOnlyTests(unittest.TestCase):
             self.assertEqual(listed(), [(0, "agent-1"), (1, "other"), (2, None),
                                         (3, "agent-1"), (4, "agent-1")])
             self.assertRegex(q.call("ls", "--id", "0")[1].decode(),
-                             r"^running id=0 dir=\S+ tag=agent-1 cpus=1 elapsed=\d+s cmd=")
+                             r"^running id=0 dir=\S+ tag=agent-1 cpus=1 gpus=0 elapsed=\d+s cmd=")
             self.assertEqual(listed("--tag", "agent-1"), [(0, "agent-1"), (3, "agent-1"), (4, "agent-1")])
             self.assertEqual(listed("--tag", "agent-1", "--tag", "other"),
                              [(0, "agent-1"), (1, "other"), (3, "agent-1"), (4, "agent-1")])
@@ -1171,12 +1289,12 @@ class VisibilityOnlyTests(unittest.TestCase):
             self.assertIn(b" dir=bad%FF%E6%97 ", out)
 
     def test_watch_wide_directory_names(self):
-        for name, shown in (("日本語のとても長いディレクトリ", "日本語のとても長"),
-                            ("🚀" * 10, "🚀" * 8)):
+        for name, shown, card in (("日本語のとても長いディレクトリ", "日本語のとても長", "日本語のとても…/"),
+                                  ("🚀" * 10, "🚀" * 8, "🚀" * 7 + "…/")):
             with self.subTest(name=name):
-                self.watch_wide_directory(name, shown)
+                self.watch_wide_directory(name, shown, card)
 
-    def watch_wide_directory(self, name, shown):
+    def watch_wide_directory(self, name, shown, card):
         with Queue() as q:
             q.call("ls")
             directory = q.path / name
@@ -1217,6 +1335,13 @@ class VisibilityOnlyTests(unittest.TestCase):
             self.assertEqual(columns(header[:header.index("CPUS") + 4]),
                              columns(row[:row.index(" 1 ") + 2]))
             self.assertTrue(all(columns(line) < 60 for line in clean.splitlines()), clean)
+            # Cards cut the name within 16 columns and keep the slash.
+            utf8 = dict(q.env, LC_ALL="en_US.UTF-8")
+            clean = plain(watch_screen(q, 80, 24, lambda data: card[:2].encode() in data, utf8))
+            row = clean.split("RUNNING", 1)[1].splitlines()[2]
+            self.assertIn(" %s " % card, row)
+            self.assertEqual(columns(row[:row.index(card) + len(card)]), 5 + 16)
+            self.assertTrue(all(columns(line) < 80 for line in clean.splitlines()), clean)
             q.release("wide")
             self.assertEqual(job.wait(timeout=3), 0)
 
@@ -1258,7 +1383,7 @@ class VisibilityOnlyTests(unittest.TestCase):
             self.assertEqual(short, [])
             self.assertEqual([int(line.split()[1].split("=")[1]) for line in full], list(range(24, 4, -1)))
             for i, line in zip(range(24, 4, -1), full):
-                self.assertRegex(line, r"^done id=%d dir=\S+ cpus=all\(4\) elapsed=\d+s exit=%d cmd=sh -c exit %d$"
+                self.assertRegex(line, r"^done id=%d dir=\S+ cpus=all\(4\) gpus=0 elapsed=\d+s exit=%d cmd=sh -c exit %d$"
                                  % (i, i % 8, i % 8))
             self.own_failure(q.call("kill", "24"), "unknown")
             self.own_failure(q.call("kill", "9999"), "unknown")
@@ -1273,11 +1398,11 @@ class VisibilityOnlyTests(unittest.TestCase):
             later = q.start("later", 1)
             q.wait_rows(3)
             lines = self.listing(q)
-            self.assertEqual(q.call("ls", "--summary"), (0, b"cpus 3/4 running 1 queued 2\n", b""))
+            self.assertEqual(q.call("ls", "--summary"), (0, b"cpus 3/4 gpus 0/1 running 1 queued 2\n", b""))
             self.assertEqual(len(lines), 3)
-            self.assertRegex(lines[0], r"^running id=0 dir=\S+ cpus=3 elapsed=\d+s est=1s(?: over)? cmd=.+")
-            self.assertRegex(lines[1], r"^queued id=1 dir=\S+ cpus=all\(4\) waited=\d+s est=2m cmd=.+")
-            self.assertRegex(lines[2], r"^queued id=2 dir=\S+ cpus=1 waited=\d+s cmd=.+")
+            self.assertRegex(lines[0], r"^running id=0 dir=\S+ cpus=3 gpus=0 elapsed=\d+s est=1s(?: over)? cmd=.+")
+            self.assertRegex(lines[1], r"^queued id=1 dir=\S+ cpus=all\(4\) gpus=0 waited=\d+s est=2m cmd=.+")
+            self.assertRegex(lines[2], r"^queued id=2 dir=\S+ cpus=1 gpus=0 waited=\d+s cmd=.+")
             self.assertLessEqual(len(lines[0].split(" cmd=", 1)[1]), 80)
             eventually(lambda: " over " in self.listing(q)[0])
             self.assertIsNone(p.poll(), "estimate must never stop the job")
@@ -1286,7 +1411,7 @@ class VisibilityOnlyTests(unittest.TestCase):
             out, err = waiting.communicate(timeout=3)
             self.own_failure((waiting.returncode, out, err), "removed")
             q.pids("later")
-            self.assertTrue(any(re.match(r"done id=1 dir=\S+ cpus=all\(4\) elapsed=0s est=2m killed cmd=", line)
+            self.assertTrue(any(re.match(r"done id=1 dir=\S+ cpus=all\(4\) gpus=0 elapsed=0s est=2m killed cmd=", line)
                                 for line in self.listing(q, True)))
             self.assertEqual(q.call("kill", "0"), (0, b"", b""))
             self.assertEqual(p.wait(timeout=3), 143)
@@ -1309,9 +1434,9 @@ class VisibilityOnlyTests(unittest.TestCase):
             waiting = q.start("waiting", env=env)
             output = read_until(waiting.stderr, lambda data: len(data.splitlines()) >= 6)
             lines = output.splitlines()
-            self.assertIn(b"id=3 queued, cpus=all(4), 2 ahead", lines[0])
-            self.assertRegex(lines[1], rb"^junban:   running id=1 dir=\S+ cpus=1 elapsed=\d+s$")
-            self.assertRegex(lines[2], rb"^junban:   running id=2 dir=\S+ cpus=1 elapsed=\d+s est=30m$")
+            self.assertIn(b"id=3 queued, cpus=all(4), gpus=0, 2 ahead, waiting for cpus", lines[0])
+            self.assertRegex(lines[1], rb"^junban:   running id=1 dir=\S+ cpus=1 gpus=0 elapsed=\d+s$")
+            self.assertRegex(lines[2], rb"^junban:   running id=2 dir=\S+ cpus=1 gpus=0 elapsed=\d+s est=30m$")
             self.assertEqual(lines[0], lines[3])
             q.release("a")
             q.release("b")
@@ -1343,7 +1468,7 @@ class VisibilityOnlyTests(unittest.TestCase):
             eventually(lambda: " over " in self.listing(q)[0])
             for method in ("q", "ctrl-c"):
                 master, slave = pty.openpty()
-                fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+                fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 80, 0, 0))
                 before = terminal_modes(slave)
                 def controlling_terminal():
                     os.setsid()
@@ -1355,29 +1480,37 @@ class VisibilityOnlyTests(unittest.TestCase):
                                          stdin=slave, stdout=slave, stderr=slave,
                                          preexec_fn=controlling_terminal)
                     q.clients.append(p)
-                    screen = read_until(master, lambda data: b"exit=2" in data)
+                    screen = read_until(master, lambda data: b"exit 2" in data)
+                    while select.select([master], [], [], 0.3)[0]:
+                        screen += os.read(master, 65536)
                     self.assertIn(b"\x1b[?1049h", screen)
                     self.assertIn(b"\x1b[?25l", screen)
                     self.assertIn(b"\x1b[1;31m", screen)
-                    self.assertIn(b"cpus 3/4 [", screen)
                     self.assertIn(b"OVER", screen)
-                    clean_screen = re.sub(rb"\x1b\[[0-?]*[ -/]*[@-~]", b"", screen)
-                    done_rows = clean_screen.split(b"DONE", 1)[1].splitlines()[2:]
-                    self.assertEqual(len(done_rows), 5)
-                    self.assertEqual([int(row.split()[0]) for row in done_rows], [6, 5, 4, 3, 2])
-                    self.assertIn(b"RESULT", clean_screen)
-                    self.assertNotIn(b"ST ID", clean_screen)
+                    clean_screen = plain(screen.rsplit(b"\x1b[H\x1b[2J", 1)[-1])
+                    self.assertRegex(clean_screen, r" CPU \S+ +3/4   running 1")
+                    self.assertRegex(clean_screen, r" GPU \S+ +0/1   queued  1")
+                    # Two rows per finished job: newest first, at most five.
+                    done_rows = clean_screen.split("DONE", 1)[1].strip("\n").splitlines()
+                    self.assertEqual(len(done_rows), 10, clean_screen)
+                    self.assertEqual([int(re.match(r"\S\s*(\d+)", row).group(1))
+                                      for row in done_rows[0::2]], [6, 5, 4, 3, 2])
+                    self.assertIn("exit 2", done_rows[9])
+                    self.assertIn("ended ", done_rows[9])
+                    self.assertNotIn("ST ID", clean_screen)
                     self.assertNotEqual(terminal_modes(slave), before)
                     if method == "q":
                         artifact("watch-ansi.txt", screen)
                         clean = re.sub(rb"\x1b\[[0-?]*[ -/]*[@-~]", b"", screen)
                         artifact("watch-screen.txt", clean.replace(b"\r", b""))
-                        self.assertTrue(all(len(line) < 80 for line in clean.splitlines()))
+                        self.assertTrue(all(len(line) < 80 for line in plain(clean).splitlines()))
                         # The same screen data must refresh correctly, not accumulate rows.
-                        refreshed = read_until(master, lambda data: b"exit=2" in data, 4)
+                        refreshed = read_until(master, lambda data: b"exit 2" in data, 4)
                         self.assertEqual(refreshed.count(b"RUNNING"), 1)
                         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 20, 40, 0, 0))
                         narrow = read_until(master, lambda data: b"exit=2" in data, 4)
+                        # Drop the end of the wide redraw read before the resize.
+                        narrow = narrow.rsplit(b"\x1b[H\x1b[2J", 1)[-1]
                         clean = re.sub(rb"\x1b\[[0-?]*[ -/]*[@-~]", b"", narrow)
                         self.assertTrue(all(len(line) < 40 for line in clean.splitlines()), clean)
                         artifact("watch-40.txt", clean.replace(b"\r", b""))
@@ -1415,6 +1548,47 @@ class VisibilityOnlyTests(unittest.TestCase):
             self.assertEqual(q.call("kill", q.rows()[1][0]), (0, b"", b""))
             waiting.communicate(timeout=3)
             q.release("watch-job")
+            self.assertEqual(job.wait(timeout=3), 0)
+
+    def test_watch_cards(self):
+        with Queue() as q:
+            self.assertEqual(q.call("run", "sh", "-c", "exit 3")[0], 3)
+            self.assertEqual(q.call("run", "true", "日本")[0], 0)
+            job = q.start("cards", 2, gpus=1, estimate="1h", tag="sweep")
+            q.pids("cards")
+            waiting = q.start("cards-wait")
+            q.wait_rows(2)
+            utf8 = dict(q.env, LC_ALL="en_US.UTF-8")
+            screen = watch_screen(q, 100, 30, lambda data: b"ended" in data, utf8)
+            clean = plain(screen)
+            running = clean.split("RUNNING 1", 1)[1].splitlines()
+            directory = q.path.name + "/"
+            # Directory, timing, resources and tag; colour marks only meaning.
+            self.assertRegex(running[2], r"^ +%s +\S+ / 1h \S+ 1h left +cpus 2 gpus 1 +#sweep$"
+                             % re.escape(directory))
+            self.assertIn(b"\x1b[94m" + directory.encode(), screen)
+            self.assertIn(b"\x1b[35m gpus 1", screen)
+            queued = clean.split("QUEUED 1", 1)[1].splitlines()
+            self.assertRegex(queued[2], r"waited \S+ +cpus all$")
+            done = clean.split("DONE", 1)[1].splitlines()
+            self.assertRegex(done[1], r"^✓ +1  true 日本$")
+            self.assertRegex(done[2], r" ok +\S+  ended \d\d:\d\d$")
+            self.assertRegex(done[3], r"^✗ +0  sh -c exit 3$")
+            self.assertIn(b"\x1b[1;31mexit 3", screen)
+            # Without colour or UTF-8, the same layout uses plain ASCII.
+            ascii_env = dict(q.env, NO_COLOR="1", LC_ALL="C")
+            screen = watch_screen(q, 100, 30, lambda data: b"ended" in data, ascii_env)
+            self.assertNotRegex(screen, rb"\x1b\[[0-9;]*m")
+            self.assertTrue(all(byte < 0x80 for byte in screen), screen)
+            # Each non-ASCII character in job text shows as one "?".
+            self.assertRegex(screen, rb"\n\+ +1  true \?\?\x1b\[K")
+            self.assertRegex(screen, rb"\n! +0  sh -c exit 3")
+            # The command uses the whole row, past the 80 bytes ls keeps.
+            command = "%s %s hold cards.pids cards.release" % (PY, WORKER)
+            self.assertIn(command[:94], running[1])
+            self.assertEqual(q.call("kill", q.rows()[1][0]), (0, b"", b""))
+            waiting.communicate(timeout=3)
+            q.release("cards")
             self.assertEqual(job.wait(timeout=3), 0)
 
     @unittest.skipUnless(sys.platform == "darwin", "macOS caffeinate only")

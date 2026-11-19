@@ -6,6 +6,30 @@ agent-readable listings and wait notifications, a terminal watch view, and macOS
 idle-sleep prevention. Removed the old command-line interface and obsolete
 packaging, output capture, mail, dependencies, and queue-reordering features.
 
+v0.2.0 (adds GPUs as a second resource; changes ls and notice output):
+ - junban run -g N (--gpus N) gives the GPUs a job uses: 0, the default,
+   or 1. The GPU is one device; only one -g 1 job runs at a time. -c and
+   -g do not change each other's default, so -g 1 alone still takes all
+   CPUs. A GPU job that needs little CPU gives both, as -c 1 -g 1.
+ - Scheduling is FIFO for each resource. A waiting job reserves the CPUs
+   and GPUs it asks for; a later job starts only within what is left. A
+   CPU job may pass a job that waits only for the GPU, and a job that
+   needs all CPUs still keeps everything behind it waiting.
+ - ls shows gpus=N on every line, ls --summary and watch show
+   gpus BUSY/TOTAL, and the narrow watch table has a GPUS column. The
+   wait notice says gpus=N and whether the job waits for cpus, gpus or
+   both.
+ - watch shows CPU and GPU gauges and gives each job two rows: its ID and
+   full command, then its directory (blue, ending in /), timing with a
+   progress bar against the estimate, the CPUs and GPUs it holds, and its
+   tag. Finished jobs show a check or a cross, the result and the clock
+   time they ended. Colour marks meaning only, NO_COLOR turns it off, and
+   a non-UTF-8 locale gets ASCII, with "?" for each non-ASCII character in
+   job text. Terminals under 64 columns keep the one-row table. ls still
+   cuts the command at 80 bytes.
+ - The protocol version is now 736, so stop a running older server with
+   junban shutdown after upgrading.
+
 v0.1.1 (changes junban ls output and exit status for scripts):
  - junban ls prints only job lines on standard output, each starting with
    running, queued or done. An empty queue prints nothing. The summary line

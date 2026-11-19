@@ -14,15 +14,20 @@
 #include <signal.h>
 #include "main.h"
 
-/* Slot accounting */
+/* Slot accounting. junban treats the GPU as one device a job uses alone;
+ * it does not assign devices, so it never counts more than one. */
 int busy_slots = 0;
 int max_slots = 1;
+int busy_gpus = 0;
+int max_gpus = 1;
 
 /* Globals */
 static struct Job *firstjob = 0;
 static struct Job *first_finished_job = 0;
 static int jobids = 0;
 int max_jobs;
+
+static int schedule(const struct Job *stop, int *short_cpus, int *short_gpus);
 
 
 static void send_list_line(int s, const char * str)
@@ -137,6 +142,7 @@ void s_snapshot(int socket, int all)
     end.type = SNAPSHOT_END;
     end.u.snapshot_end.max_slots = max_slots;
     end.u.snapshot_end.next_jobid = jobids;
+    end.u.snapshot_end.max_gpus = max_gpus;
     send_msg(socket, &end);
 }
 
@@ -146,13 +152,15 @@ void s_wait_notice(int socket, int jobid)
     struct msg end = {0};
     char line[512], timing[128], cpus[32];
     struct Job_view queued;
-    int ahead = 0;
+    int ahead = 0, short_cpus = 0, short_gpus = 0;
     if (!job || job->state != QUEUED || job->kill_requested) return;
     for (p = firstjob; p && p != job; p = p->next) ++ahead;
+    schedule(job, &short_cpus, &short_gpus);
     job_view(job, &queued);
     view_cpus(&queued, cpus, sizeof(cpus));
-    snprintf(line, sizeof(line), "id=%d queued, cpus=%s, %d ahead\n",
-             jobid, cpus, ahead);
+    snprintf(line, sizeof(line), "id=%d queued, cpus=%s, gpus=%d, %d ahead, waiting for %s\n",
+             jobid, cpus, queued.gpus, ahead,
+             short_cpus && short_gpus ? "cpus and gpus" : short_gpus ? "gpus" : "cpus");
     send_list_line(socket, line);
     for (p = firstjob; p; p = p->next) {
         struct Job_view view;
@@ -160,8 +168,8 @@ void s_wait_notice(int socket, int jobid)
         job_view(p, &view);
         view_fields(&view, timing, sizeof(timing));
         view_cpus(&view, cpus, sizeof(cpus));
-        snprintf(line, sizeof(line), "  running id=%d dir=%s cpus=%s %s\n",
-                 p->jobid, view.label, cpus, timing);
+        snprintf(line, sizeof(line), "  running id=%d dir=%s cpus=%s gpus=%d %s\n",
+                 p->jobid, view.label, cpus, view.gpus, timing);
         send_list_line(socket, line);
     }
     end.type = NOTICE_END;
@@ -220,11 +228,13 @@ int s_newjob(int s, struct msg *m)
     p->estimate = 0;
     p->queued_at = monotime();
     p->started_at = p->finished_at = 0;
+    p->finished_wall = 0;
     memset(&p->result, 0, sizeof(p->result));
     p->client_lost = 0;
     p->finish_pending = p->stop_kill_sent = 0;
     p->stop_deadline = 0;
     p->num_slots = p->cpus_unspecified ? max_slots : m->u.newjob.num_slots;
+    p->num_gpus = m->u.newjob.num_gpus;
     p->pid = 0;
     p->kill_requested = 0;
     p->should_keep_finished = p->state != HOLDING_CLIENT;
@@ -261,38 +271,45 @@ disconnected:
     return -1;
 }
 
-/* -1 if no one should be run. */
+/* Per-resource FIFO. Jobs are taken in queue order. A job that cannot
+ * start reserves what it asks for, so a later job may start only within
+ * what is left after every earlier queued job's reservation. A later job
+ * therefore never takes a CPU or GPU an earlier job is waiting for, yet it
+ * may pass a job that waits only for a resource it does not use. Every job
+ * uses at least one CPU, so once the reservations cover all CPUs nothing
+ * behind can start, which keeps a job that needs all CPUs from starving.
+ * Returns the job's remaining shortage in *short_cpus and *short_gpus when
+ * stop is given and reached, for the wait notice. -1 if no one should run. */
+static int schedule(const struct Job *stop, int *short_cpus, int *short_gpus)
+{
+    int free_cpus = max_slots - busy_slots, free_gpus = max_gpus - busy_gpus;
+    struct Job *p;
+    /* The notice scans up to its job even when no CPU is left, so it also
+     * sees the GPUs that earlier jobs reserve. */
+    for (p = firstjob; p != 0 && (stop || free_cpus > 0); p = p->next) {
+        if (p->state != QUEUED) continue;
+        /* A job being killed in the queue keeps its reservation until it goes. */
+        int fits = !p->kill_requested && p->num_slots <= free_cpus &&
+                   p->num_gpus <= free_gpus;
+        if (p == stop) {
+            *short_cpus = p->num_slots > free_cpus;
+            *short_gpus = p->num_gpus > free_gpus;
+            return -1;
+        }
+        if (fits && !stop) {
+            busy_slots = busy_slots + p->num_slots;
+            busy_gpus = busy_gpus + p->num_gpus;
+            return p->jobid;
+        }
+        free_cpus = free_cpus > p->num_slots ? free_cpus - p->num_slots : 0;
+        free_gpus = free_gpus > p->num_gpus ? free_gpus - p->num_gpus : 0;
+    }
+    return -1;
+}
+
 int next_run_job()
 {
-    struct Job *p;
-
-    const int free_slots = max_slots - busy_slots;
-
-    if (free_slots <= 0)
-        return -1;
-
-    /* If there are no jobs to run... */
-    if (firstjob == 0)
-        return -1;
-
-    /* Look for a runnable task */
-    p = firstjob;
-    while(p != 0)
-    {
-        if (p->state == QUEUED)
-        {
-            if (p->kill_requested) return -1;
-            if (free_slots >= p->num_slots)
-            {
-                busy_slots = busy_slots + p->num_slots;
-                return p->jobid;
-            }
-            return -1; /* Strict FIFO: never bypass the first queued job. */
-        }
-        p = p->next;
-    }
-
-    return -1;
+    return schedule(NULL, NULL, NULL);
 }
 
 /* junban keeps the results of the last 1000 finished jobs, so junban wait
@@ -401,12 +418,15 @@ void job_finished(const struct Result *result, int jobid)
     /* The job may be not only in running state, but also in other states, as
      * we call this to clean up the jobs list in case of the client closing the
      * connection. */
-    if (p->state == RUNNING)
+    if (p->state == RUNNING) {
         busy_slots = busy_slots - p->num_slots;
+        busy_gpus = busy_gpus - p->num_gpus;
+    }
 
     p->state = FINISHED;
     p->result = *result;
     p->finished_at = monotime();
+    p->finished_wall = (long long)time(NULL);
 
     /* Find the pointing node, to
      * update it removing the finished job. */
@@ -569,7 +589,8 @@ void s_get_max_slots(int s)
 
     /* Message */
     m.type = GET_MAX_SLOTS_OK;
-    m.u.max_slots = max_slots;
+    m.u.snapshot_end.max_slots = max_slots;
+    m.u.snapshot_end.max_gpus = max_gpus;
 
     send_msg(s, &m);
 }
