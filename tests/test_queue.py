@@ -858,7 +858,7 @@ class VisibilityOnlyTests(unittest.TestCase):
                            "ls     0 if it listed a job, 1 if it listed none"):
                 self.assertIn(phrase, text)
             self.assertLessEqual(max(map(len, text.splitlines())), 100)
-            self.assertEqual(q.call("version")[1], b"junban 0.2.0 (based on task-spooler 1.0.4)\n")
+            self.assertEqual(q.call("version")[1], b"junban 0.2.1 (based on task-spooler 1.0.4)\n")
             self.assertEqual(q.call("ls", "--summary"), (0, b"cpus 0/4 gpus 0/1 running 0 queued 0\n", b""))
             for args in (["--summary", "-a"], ["-a", "-a"], ["--summary", "--summary"]):
                 self.own_failure(q.call("ls", *args))
