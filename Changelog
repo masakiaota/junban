@@ -6,6 +6,18 @@ agent-readable listings and wait notifications, a terminal watch view, and macOS
 idle-sleep prevention. Removed the old command-line interface and obsolete
 packaging, output capture, mail, dependencies, and queue-reordering features.
 
+v0.2.1 (watch layout fixes):
+ - watch sizes the directory column to the names on screen, up to 32
+   columns, so names over 16 columns are no longer cut early. Space goes
+   to the directory first, then the CPUs and GPUs, then the timing, and
+   the tag last. Jobs only counted in "... N more" take no room.
+ - Queued jobs show their estimate next to the time waited.
+ - The one-row table for terminals under 64 columns is gone. Narrow
+   terminals use the same two-row cards: the tag is dropped first, then
+   the timing shrinks, and each piece on the second row shows whole or
+   not at all.
+ - No protocol change; a running 0.2.0 server keeps working.
+
 v0.2.0 (adds GPUs as a second resource; changes ls and notice output):
  - junban run -g N (--gpus N) gives the GPUs a job uses: 0, the default,
    or 1. The GPU is one device; only one -g 1 job runs at a time. -c and

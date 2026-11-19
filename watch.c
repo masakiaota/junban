@@ -58,123 +58,13 @@ static void stop_watch(int signal_number)
     watch_stopping = 1;
 }
 
-static void line(const char *text, const char *colour, int width, int *row, int height)
-{
-    char fitted[1024];
-    if (*row >= height - 1) return;
-    /* Count terminal columns, not bytes, and never split a character. */
-    fit_columns(fitted, sizeof(fitted), text, width > 1 ? width - 1 : 0, 0);
-    printf("%s%s%s\033[K\n", sgr(colour), fitted, use_colour ? "\033[0m" : "");
-    ++*row;
-}
-
-static void draw_table(const struct Snapshot *snapshot, int width, int height)
-{
-    char text[1024], bar[49], header[256];
-    int row = 0;
-    /* Narrow terminals drop the GPUS column so COMMAND keeps its room, and
-     * the header drops the title, then the GPU totals, until q:quit fits
-     * with at least a one-character bar. junban ls still shows gpus=. */
-    const int wide = width >= 50;
-    const char *title = "junban  ";
-    char gpus[32];
-    snprintf(gpus, sizeof(gpus), "gpus %d/%d ", snapshot->busy_gpus, snapshot->total_gpus);
-    for (;;) {
-        snprintf(header, sizeof(header), "%scpus %d/%d [] %srunning %d queued %d q:quit",
-                 title, snapshot->busy, snapshot->total, gpus, snapshot->running, snapshot->queued);
-        if ((int)strlen(header) + 1 <= width - 1 || (!*title && !*gpus)) break;
-        if (*title) title = "";
-        else gpus[0] = 0;
-    }
-    int bars = width - 1 - (int)strlen(header);
-    if (bars < 1) bars = 1;
-    if (bars > 48) bars = 48;
-    int filled = snapshot->total ? (int)((long long)bars * snapshot->busy / snapshot->total) : 0;
-    for (int i = 0; i < bars; ++i) bar[i] = i < filled ? '#' : '-';
-    bar[bars] = 0;
-    snprintf(text, sizeof(text), "%scpus %d/%d [%s] %srunning %d queued %d q:quit",
-             title, snapshot->busy, snapshot->total, bar, gpus, snapshot->running,
-             snapshot->queued);
-    line(text, "\033[36m", width, &row, height);
-    const int states[] = {RUNNING, QUEUED, FINISHED};
-    const char *names[] = {"RUNNING", "QUEUED", "DONE"};
-    const char *colours[] = {"\033[32m", "\033[33m", "\033[2m"};
-    int counts[3] = {0}, shown[3] = {0};
-    int id_width = 2, cpu_width = 4, gpu_width = wide ? 5 : 0; /* GPUS plus its space */
-    for (size_t i = 0; i < snapshot->count; ++i) {
-        const struct Job_view *v = &snapshot->jobs[i];
-        for (int j = 0; j < 3; ++j) if (v->state == states[j]) ++counts[j];
-        int n = snprintf(text, sizeof(text), "%d", v->jobid);
-        if (n > id_width) id_width = n;
-        n = snprintf(text, sizeof(text), "%d", v->cpus);
-        if (n > cpu_width) cpu_width = n;
-    }
-    /* Share spare rows across nonempty sections; finished history is capped at five. */
-    int spare = height - 5;
-    for (int j = 0; j < 3; ++j) if (counts[j]) --spare;
-    while (spare > 0) {
-        int progress = 0;
-        for (int j = 0; j < 3 && spare > 0; ++j)
-            if (shown[j] < counts[j] && (j != 2 || shown[j] < 5)) {
-                ++shown[j]; --spare; progress = 1;
-            }
-        if (!progress) break;
-    }
-    for (int section = 0; section < 3; ++section) {
-        line(names[section], "\033[1m", width, &row, height);
-        if (!counts[section]) continue;
-        int time_width = 7, detail_width = section == 2 ? (width < 50 ? 10 : 11) : 8;
-        int dir_width = 16;
-        /* Reserve COMMAND first, then shrink DIR only on narrow terminals. */
-        int command_width = width - 1 - (id_width + dir_width + cpu_width + gpu_width +
-                                         time_width + detail_width + 6);
-        if (command_width < 7) {
-            dir_width -= 7 - command_width;
-            if (dir_width < 3) dir_width = 3;
-        }
-        snprintf(text, sizeof(text), " %*s %-*s %*s %s%-*s %-*s COMMAND",
-                 id_width, "ID", dir_width, "DIR", cpu_width, "CPUS", wide ? "GPUS " : "", time_width,
-                 section == 1 ? "WAITED" : "ELAPSED", detail_width, section == 2 ? "RESULT" : "EST");
-        line(text, "\033[2m", width, &row, height);
-        int count = 0;
-        for (size_t i = 0; i < snapshot->count && count < shown[section]; ++i) {
-            const struct Job_view *v = &snapshot->jobs[i];
-            if (v->state != states[section]) continue;
-            char timing[48], detail[64] = "", cpus[32], gpu_cell[16] = "", dir[sizeof(v->label) + 16];
-            if (v->unspecified) snprintf(cpus, sizeof(cpus), "all");
-            else snprintf(cpus, sizeof(cpus), "%d", v->cpus);
-            format_duration(timing, sizeof(timing), (unsigned long long)
-                            (section == 1 ? v->waited : v->elapsed));
-            int over = section == 0 && v->estimate && v->elapsed > (double)v->estimate;
-            if (section == 2) view_status(v, detail, sizeof(detail));
-            else if (section == 0 && (v->killed || v->client_lost))
-                snprintf(detail, sizeof(detail), "stopping");
-            else if (v->estimate) {
-                char estimate[48];
-                format_duration(estimate, sizeof(estimate), v->estimate);
-                snprintf(detail, sizeof(detail), "%s%s", estimate, over ? " OVER" : "");
-            }
-            fit_columns(dir, sizeof(dir), v->label, dir_width, 1);
-            if (wide) snprintf(gpu_cell, sizeof(gpu_cell), "%4d ", v->gpus);
-            snprintf(text, sizeof(text), " %*d %s %*s %s%-*s %-*s %s",
-                     id_width, v->jobid, dir, cpu_width, cpus, gpu_cell,
-                     time_width, timing, detail_width, detail, v->command);
-            line(text, over ? "\033[1;31m" : colours[section], width, &row, height);
-            ++count;
-        }
-        if (count < counts[section] && section != 2) {
-            snprintf(text, sizeof(text), " ... %d more (junban ls)", counts[section] - count);
-            line(text, "\033[2m", width, &row, height);
-        }
-    }
-}
-
 /* One screen row built from styled pieces. Columns are counted on the
  * visible text only, so a cut never splits a character or an escape. */
 struct row {
     char text[4096];
     size_t used;
     int columns, limit;
+    int whole; /* Skip a piece that does not fit rather than cut it. */
 };
 
 static void row_start(struct row *r, int width)
@@ -183,6 +73,7 @@ static void row_start(struct row *r, int width)
     r->used = 0;
     r->columns = 0;
     r->limit = width > 1 ? width - 1 : 0;
+    r->whole = 0;
 }
 
 static void row_raw(struct row *r, const char *s)
@@ -195,6 +86,7 @@ static void put(struct row *r, const char *style, const char *s)
 {
     char fitted[1024];
     if (r->columns >= r->limit || !*s) return;
+    if (r->whole && text_columns(s) > r->limit - r->columns) return;
     fit_columns(fitted, sizeof(fitted), s, r->limit - r->columns, 0);
     if (!*fitted) return;
     row_raw(r, sgr(style));
@@ -306,14 +198,21 @@ static void dir_text(char *dst, size_t size, const char *label, int columns)
 /* RUNNING: elapsed, with "/ EST", a progress bar and the time left (or
  * OVER) when an estimate was given. QUEUED: the time waited. DONE: the
  * result, the run time and the clock time it ended. */
-static void timing(struct row *r, const struct Job_view *v, int section, int end)
+static void timing_text(struct row *r, const struct Job_view *v, int section, int end)
 {
     char elapsed[48], estimate[48], tail[64], text[64];
     format_duration(elapsed, sizeof(elapsed), (unsigned long long)
                     (section == 1 ? v->waited : v->elapsed));
     if (section == 1) {
-        put(r, MUTED, "waited ");
+        if (r->columns + 7 + (int)strlen(elapsed) <= end) put(r, MUTED, "waited ");
         put(r, "", elapsed);
+        if (v->estimate) {
+            format_duration(estimate, sizeof(estimate), v->estimate);
+            if (r->columns + 6 + (int)strlen(estimate) <= end) {
+                put(r, MUTED, "  est ");
+                put(r, "", estimate);
+            }
+        }
         return;
     }
     if (section == 2) {
@@ -360,15 +259,19 @@ static void timing(struct row *r, const struct Job_view *v, int section, int end
         snprintf(tail, sizeof(tail), "%s left", text);
     }
     /* Stay inside the timing field so the resources after it stay visible:
-     * drop "/ EST" first, then the elapsed time, when they do not fit. */
+     * drop "/ EST" first, then the elapsed time, then the time left. */
     snprintf(text, sizeof(text), " / %s ", estimate);
-    int room = end - r->columns, saved_limit = r->limit;
+    int room = end - r->columns;
     if ((int)(strlen(elapsed) + strlen(text) + strlen(tail)) > room)
         snprintf(text, sizeof(text), " ");
     if ((int)(strlen(elapsed) + strlen(text) + strlen(tail)) <= room)
         put(r, over ? WRONG : "", elapsed);
-    else
+    else if ((int)strlen(tail) <= room)
         text[0] = 0;
+    else {
+        put(r, over ? WRONG : "", elapsed);
+        return;
+    }
     put(r, MUTED, text);
     int bars = end - r->columns - 1 - (int)strlen(tail);
     if (bars > 20) bars = 20;
@@ -378,9 +281,17 @@ static void timing(struct row *r, const struct Job_view *v, int section, int end
         repeat(r, MUTED, use_utf8 ? "─" : "-", bars - filled);
         put(r, "", " ");
     }
-    if (end < r->limit) r->limit = end;
     put(r, over ? WRONG : "", tail);
-    r->limit = saved_limit;
+}
+
+/* Running and queued jobs keep their timing inside the field, so the
+ * resources after it stay visible; finished jobs have none to keep. */
+static void timing(struct row *r, const struct Job_view *v, int section, int end)
+{
+    int saved = r->limit;
+    if (section != 2 && end < r->limit) r->limit = end;
+    timing_text(r, v, section, end);
+    r->limit = saved;
 }
 
 /* Without UTF-8, every multibyte character in job text becomes one "?", so
@@ -398,16 +309,22 @@ static void ascii_only(char *s)
 /* Each job takes two rows: its ID and command, then where it runs, its
  * timing, the resources it holds and its tag, in fixed columns. */
 static void card(const struct Job_view *v, int section, int width, int id_width,
-                 int tag_width, int *row, int height)
+                 int dir_need, int tag_width, int *row, int height)
 {
     struct row r;
     char text[512];
     const int resource_width = 15, indent = 1 + id_width + 2;
-    int dir_width = width - 1 - indent - 4 - resource_width - tag_width - 24;
-    if (dir_width > 16) dir_width = 16;
+    /* The directory column fits the longest name on screen, up to 32
+     * columns, while the timing keeps at least 24; the tag comes last. */
+    int dir_width = width - 1 - indent - 4 - resource_width - 24;
+    if (dir_width > dir_need) dir_width = dir_need;
+    if (dir_width > 32) dir_width = 32;
     if (dir_width < 8) dir_width = 8;
+    /* A narrow terminal first lets the tag go past the edge, then shrinks
+     * the timing, so the resources stay on screen as long as they can. */
     int time_width = width - 1 - indent - dir_width - 4 - resource_width - tag_width;
-    if (time_width < 24) time_width = 24;
+    if (time_width < 24) time_width = width - 1 - indent - dir_width - 4 - resource_width;
+    if (time_width < 0) time_width = 0;
     if (time_width > 40) time_width = 40;
     int ok = section == 2 && succeeded(v), quiet = ok;
     const char *id_style = section == 0 ? RUN_COLOUR : section == 1 ? QUEUE_COLOUR :
@@ -422,6 +339,7 @@ static void card(const struct Job_view *v, int section, int width, int id_width,
     put(&r, quiet ? MUTED : "", v->command);
     row_print(&r, row, height);
     row_start(&r, width);
+    r.whole = 1;
     pad_to(&r, indent);
     dir_text(text, sizeof(text), v->label, dir_width);
     put(&r, quiet ? MUTED : DIR_COLOUR, text);
@@ -452,16 +370,13 @@ static void draw_cards(const struct Snapshot *snapshot, int width, int height)
     const int states[] = {RUNNING, QUEUED, FINISHED};
     const char *names[] = {"RUNNING", "QUEUED", "DONE"};
     const char *styles[] = {BOLD RUN_COLOUR, BOLD QUEUE_COLOUR, BOLD};
-    int counts[3] = {0}, shown[3] = {0}, id_width = 2, tag_width = 0, row = 0;
+    int counts[3] = {0}, shown[3] = {0}, id_width = 2, dir_need = 0, tag_width = 0, row = 0;
     char text[64];
     for (size_t i = 0; i < snapshot->count; ++i) {
         const struct Job_view *v = &snapshot->jobs[i];
         for (int j = 0; j < 3; ++j) if (v->state == states[j]) ++counts[j];
         int n = snprintf(text, sizeof(text), "%d", v->jobid);
         if (n > id_width) id_width = n;
-        /* Room for "  #tag", up to 16 columns, when any job has a tag. */
-        n = v->tag[0] ? 3 + text_columns(v->tag) : 0;
-        if (n > tag_width) tag_width = n > 16 ? 16 : n;
     }
     header(snapshot, width, &row, height);
     /* Three header rows, a blank row and a heading per section, and the
@@ -476,6 +391,19 @@ static void draw_cards(const struct Snapshot *snapshot, int width, int height)
                 ++shown[j]; spare -= 2; progress = 1;
             }
         if (!progress) break;
+    }
+    /* Size the directory and tag columns from the cards on screen only, so a
+     * job counted in "... N more" takes no room. */
+    int seen[3] = {0};
+    for (size_t i = 0; i < snapshot->count; ++i) {
+        const struct Job_view *v = &snapshot->jobs[i];
+        int j = v->state == RUNNING ? 0 : v->state == QUEUED ? 1 : v->state == FINISHED ? 2 : -1;
+        if (j < 0 || seen[j]++ >= shown[j]) continue;
+        int n = text_columns(v->label) + 1;
+        if (n > dir_need) dir_need = n;
+        /* Room for "  #tag", up to 24 columns. */
+        n = v->tag[0] ? 3 + text_columns(v->tag) : 0;
+        if (n > tag_width) tag_width = n > 24 ? 24 : n;
     }
     for (int section = 0; section < 3; ++section) {
         struct row r;
@@ -492,7 +420,7 @@ static void draw_cards(const struct Snapshot *snapshot, int width, int height)
         for (size_t i = 0; i < snapshot->count && count < shown[section]; ++i) {
             const struct Job_view *v = &snapshot->jobs[i];
             if (v->state != states[section]) continue;
-            card(v, section, width, id_width, tag_width, &row, height);
+            card(v, section, width, id_width, dir_need, tag_width, &row, height);
             ++count;
         }
         if (count < counts[section] && section != 2) {
@@ -504,8 +432,6 @@ static void draw_cards(const struct Snapshot *snapshot, int width, int height)
     }
 }
 
-/* Terminals of 64 columns or more get two-row cards; narrower ones keep
- * the one-row table. */
 static void draw(const struct Snapshot *snapshot)
 {
     struct winsize window = {0};
@@ -514,8 +440,7 @@ static void draw(const struct Snapshot *snapshot)
     if (window.ws_col) width = window.ws_col;
     if (window.ws_row) height = window.ws_row;
     fputs("\033[H\033[2J", stdout);
-    if (width >= 64) draw_cards(snapshot, width, height);
-    else draw_table(snapshot, width, height);
+    draw_cards(snapshot, width, height);
     fflush(stdout);
 }
 
