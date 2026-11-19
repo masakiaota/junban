@@ -154,22 +154,22 @@ junban                                                         14:32:05  q:quit
 
 RUNNING 2
   1  python train.py --lr 0.1 --epochs 50
-     AHC075-b/         12m / 30m ━━━━─────── 18m left  cpus 2 gpus 1  #sweep
+     AHC075-b/  12m / 30m ━━━━━━━──────────── 18m left  cpus 2 gpus 1  #sweep
   3  sleep 30
-     AHC075-a/         45s / 30s ━━━━━━━━━━ OVER +15s  cpus 1
+     AHC075-a/  45s / 30s ━━━━━━━━━━━━━━━━━━ OVER +15s  cpus 1
 
 QUEUED 1
   4  python eval.py --ckpt best.pt
-     AHC075-b/         waited 40s                      cpus 1 gpus 1  #sweep
+     AHC075-b/  waited 40s  est 10m                     cpus 1 gpus 1  #sweep
 
 DONE
 ✗ 2  pytest -x
-     AHC075-a/         exit 1   42s  ended 14:25
+     AHC075-a/  exit 1   42s  ended 14:25
 ✓ 0  true
-     AHC075-a/         ok       0s  ended 14:20
+     AHC075-a/  ok       0s  ended 14:20
 ```
 
-Each job takes two rows: its ID and command, then its directory, timing, the CPUs and GPUs it holds, and its tag. A running job with an estimate shows a progress bar and the time left, or `OVER` once past it. A finished job shows `✓` or `✗`, its result, and the time it ended. Colour marks meaning only: CPUs are cyan, GPUs magenta, directories blue, and anything wrong red. `NO_COLOR=1` turns colour off, and without a UTF-8 locale the screen uses ASCII only, with `?` for each non-ASCII character in job text. A terminal narrower than 64 columns gets a one-row table instead.
+Each job takes two rows: its ID and command, then its directory, timing, the CPUs and GPUs it holds, and its tag. The directory column widens to fit the names on screen, up to 32 columns. A running job with an estimate shows a progress bar and the time left, or `OVER` once past it; a queued one shows its estimate. A finished job shows `✓` or `✗`, its result, and the time it ended. Colour marks meaning only: CPUs are cyan, GPUs magenta, directories blue, and anything wrong red. `NO_COLOR=1` turns colour off, and without a UTF-8 locale the screen uses ASCII only, with `?` for each non-ASCII character in job text. On a narrow terminal the tag is dropped first, then the timing shrinks; each piece shows whole or not at all.
 
 ### Stop a job
 

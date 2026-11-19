@@ -1289,12 +1289,12 @@ class VisibilityOnlyTests(unittest.TestCase):
             self.assertIn(b" dir=bad%FF%E6%97 ", out)
 
     def test_watch_wide_directory_names(self):
-        for name, shown, card in (("日本語のとても長いディレクトリ", "日本語のとても長", "日本語のとても…/"),
-                                  ("🚀" * 10, "🚀" * 8, "🚀" * 7 + "…/")):
+        for name, cut in (("日本語のとても長いディレクトリ", "日本語のとて…/"),
+                          ("🚀" * 10, "🚀" * 6 + "…/")):
             with self.subTest(name=name):
-                self.watch_wide_directory(name, shown, card)
+                self.watch_wide_directory(name, cut)
 
-    def watch_wide_directory(self, name, shown, card):
+    def watch_wide_directory(self, name, cut):
         with Queue() as q:
             q.call("ls")
             directory = q.path / name
@@ -1303,45 +1303,20 @@ class VisibilityOnlyTests(unittest.TestCase):
             job = q.popen("run", "-c", "1", PY, WORKER, "hold", q.path / "wide.pids",
                           q.path / "wide.release", cwd=directory, env=env)
             q.pids("wide")
-            master, slave = pty.openpty()
-            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 60, 0, 0))
-            def controlling_terminal():
-                os.setsid()
-                fcntl.ioctl(0, termios.TIOCSCTTY, 0)
-                os.tcsetpgrp(0, os.getpgrp())
-            try:
-                p = subprocess.Popen([BIN, "watch"], cwd=q.path, env=q.env, stdin=slave,
-                                     stdout=slave, stderr=slave, preexec_fn=controlling_terminal)
-                q.clients.append(p)
-                screen = read_until(master, lambda data: shown[:2].encode() in data)
-                p.terminate()
-                end = time.monotonic() + 3
-                while p.poll() is None and time.monotonic() < end:
-                    if select.select([master], [], [], 0.05)[0]:
-                        os.read(master, 65536)
-                self.assertEqual(p.wait(timeout=1), 0)
-            finally:
-                os.close(master)
-                os.close(slave)
-            clean = re.sub(rb"\x1b\[[0-?]*[ -/]*[@-~]", b"", screen).decode().replace("\r", "")
             def columns(text):
                 return sum(2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in text)
-            rows = clean.split("RUNNING", 1)[1].splitlines()
-            header, row = rows[1], rows[2]
-            self.assertNotIn("%E", row)
-            # The DIR cell holds whole characters within 16 columns, so the
-            # CPUS column lines up with its header.
-            self.assertIn(" %s " % shown, row)
-            self.assertEqual(columns(header[:header.index("CPUS") + 4]),
-                             columns(row[:row.index(" 1 ") + 2]))
-            self.assertTrue(all(columns(line) < 60 for line in clean.splitlines()), clean)
-            # Cards cut the name within 16 columns and keep the slash.
             utf8 = dict(q.env, LC_ALL="en_US.UTF-8")
-            clean = plain(watch_screen(q, 80, 24, lambda data: card[:2].encode() in data, utf8))
-            row = clean.split("RUNNING", 1)[1].splitlines()[2]
-            self.assertIn(" %s " % card, row)
-            self.assertEqual(columns(row[:row.index(card) + len(card)]), 5 + 16)
-            self.assertTrue(all(columns(line) < 80 for line in clean.splitlines()), clean)
+            # The directory column fits the whole name when there is room,
+            # and otherwise cuts it at a character and keeps the slash.
+            for width, shown in ((80, name + "/"), (64, cut)):
+                clean = plain(watch_screen(q, width, 24, lambda data: shown[:2].encode() in data,
+                                           utf8))
+                row = clean.split("RUNNING", 1)[1].splitlines()[2]
+                self.assertNotIn("%E", row)
+                self.assertIn(" %s " % shown, row)
+                self.assertRegex(row, r"cpus 1$")
+                self.assertTrue(all(columns(line) < width for line in clean.splitlines()), clean)
+            self.assertEqual(columns(row[:row.index(cut) + len(cut)]), 5 + 14)
             q.release("wide")
             self.assertEqual(job.wait(timeout=3), 0)
 
@@ -1508,15 +1483,19 @@ class VisibilityOnlyTests(unittest.TestCase):
                         refreshed = read_until(master, lambda data: b"exit 2" in data, 4)
                         self.assertEqual(refreshed.count(b"RUNNING"), 1)
                         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 20, 40, 0, 0))
-                        narrow = read_until(master, lambda data: b"exit=2" in data, 4)
-                        # Drop the end of the wide redraw read before the resize.
-                        narrow = narrow.rsplit(b"\x1b[H\x1b[2J", 1)[-1]
-                        clean = re.sub(rb"\x1b\[[0-?]*[ -/]*[@-~]", b"", narrow)
+                        # Only redraws after the resize count.
+                        clear = b"\x1b[H\x1b[2J"
+                        narrow = read_until(master, lambda data: clear in data and
+                                            b"exit 6" in data.rsplit(clear, 1)[-1], 4)
+                        while select.select([master], [], [], 0.3)[0]:
+                            narrow += os.read(master, 65536)
+                        clean = plain(narrow.rsplit(clear, 1)[-1])
                         self.assertTrue(all(len(line) < 40 for line in clean.splitlines()), clean)
-                        artifact("watch-40.txt", clean.replace(b"\r", b""))
-                        for token in (b"DIR", b"CPUS", b"ELAPSED", b"WAITED", b"EST", b"RESULT", b"COMMAND", b"OVER", b"all", b"q:quit"):
+                        artifact("watch-40.txt", clean)
+                        # The same cards, with each piece whole or left out.
+                        for token in ("q:quit", " CPU ", " GPU ", "RUNNING 1", "QUEUED 1", "DONE",
+                                      "cpus 3", "cpus all", "exit 6"):
                             self.assertIn(token, clean)
-                        self.assertNotIn(b"ST ID", clean)
                         os.write(master, b"q")
                     else:
                         os.write(master, b"\x03")
@@ -1556,7 +1535,7 @@ class VisibilityOnlyTests(unittest.TestCase):
             self.assertEqual(q.call("run", "true", "日本")[0], 0)
             job = q.start("cards", 2, gpus=1, estimate="1h", tag="sweep")
             q.pids("cards")
-            waiting = q.start("cards-wait")
+            waiting = q.start("cards-wait", estimate="2m")
             q.wait_rows(2)
             utf8 = dict(q.env, LC_ALL="en_US.UTF-8")
             screen = watch_screen(q, 100, 30, lambda data: b"ended" in data, utf8)
@@ -1569,7 +1548,7 @@ class VisibilityOnlyTests(unittest.TestCase):
             self.assertIn(b"\x1b[94m" + directory.encode(), screen)
             self.assertIn(b"\x1b[35m gpus 1", screen)
             queued = clean.split("QUEUED 1", 1)[1].splitlines()
-            self.assertRegex(queued[2], r"waited \S+ +cpus all$")
+            self.assertRegex(queued[2], r"waited \S+  est 2m +cpus all$")
             done = clean.split("DONE", 1)[1].splitlines()
             self.assertRegex(done[1], r"^✓ +1  true 日本$")
             self.assertRegex(done[2], r" ok +\S+  ended \d\d:\d\d$")

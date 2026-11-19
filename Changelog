@@ -15,18 +15,19 @@ v0.2.0 (adds GPUs as a second resource; changes ls and notice output):
    and GPUs it asks for; a later job starts only within what is left. A
    CPU job may pass a job that waits only for the GPU, and a job that
    needs all CPUs still keeps everything behind it waiting.
- - ls shows gpus=N on every line, ls --summary and watch show
-   gpus BUSY/TOTAL, and the narrow watch table has a GPUS column. The
-   wait notice says gpus=N and whether the job waits for cpus, gpus or
-   both.
+ - ls shows gpus=N on every line, and ls --summary and watch show
+   gpus BUSY/TOTAL. The wait notice says gpus=N and whether the job waits
+   for cpus, gpus or both.
  - watch shows CPU and GPU gauges and gives each job two rows: its ID and
-   full command, then its directory (blue, ending in /), timing with a
-   progress bar against the estimate, the CPUs and GPUs it holds, and its
-   tag. Finished jobs show a check or a cross, the result and the clock
-   time they ended. Colour marks meaning only, NO_COLOR turns it off, and
-   a non-UTF-8 locale gets ASCII, with "?" for each non-ASCII character in
-   job text. Terminals under 64 columns keep the one-row table. ls still
-   cuts the command at 80 bytes.
+   full command, then its directory (blue, ending in /, as wide as the
+   names need up to 32 columns), timing with a progress bar against the
+   estimate (queued jobs show the estimate), the CPUs and GPUs it holds,
+   and its tag. Finished jobs show a check or a cross, the result and the
+   clock time they ended. Colour marks meaning only, NO_COLOR turns it
+   off, and a non-UTF-8 locale gets ASCII, with "?" for each non-ASCII
+   character in job text. The old one-row table is gone: narrow terminals
+   drop the tag, then shrink the timing, and show each piece whole or not
+   at all. ls still cuts the command at 80 bytes.
  - The protocol version is now 736, so stop a running older server with
    junban shutdown after upgrading.
 
