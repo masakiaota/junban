@@ -1491,7 +1491,7 @@ class VisibilityOnlyTests(unittest.TestCase):
                             narrow += os.read(master, 65536)
                         clean = plain(narrow.rsplit(clear, 1)[-1])
                         self.assertTrue(all(len(line) < 40 for line in clean.splitlines()), clean)
-                        artifact("watch-40.txt", clean)
+                        artifact("watch-40.txt", clean.encode())
                         # The same cards, with each piece whole or left out.
                         for token in ("q:quit", " CPU ", " GPU ", "RUNNING 1", "QUEUED 1", "DONE",
                                       "cpus 3", "cpus all", "exit 6"):
@@ -1568,6 +1568,34 @@ class VisibilityOnlyTests(unittest.TestCase):
             self.assertEqual(q.call("kill", q.rows()[1][0]), (0, b"", b""))
             waiting.communicate(timeout=3)
             q.release("cards")
+            self.assertEqual(job.wait(timeout=3), 0)
+
+    def test_watch_narrow_and_hidden(self):
+        with Queue() as q:
+            job = q.start("narrow", 1)
+            q.pids("narrow")
+            gpu = q.start("narrow-gpu", gpus=1)
+            q.wait_rows(2)
+            long_dir = q.path / ("x" * 30)
+            long_dir.mkdir()
+            hidden = q.popen("run", "true", cwd=long_dir, env=dict(q.env, JUNBAN_SOCKET="../s"))
+            q.wait_rows(3)
+            utf8 = dict(q.env, LC_ALL="en_US.UTF-8")
+            # Timing shrinks before a resource is left out.
+            clean = plain(watch_screen(q, 40, 30, lambda data: b"xxx" in data, utf8))
+            self.assertIn("cpus all gpus 1", clean)
+            self.assertTrue(all(len(line) < 40 for line in clean.splitlines()), clean)
+            # A job only counted in "... N more" takes no directory room.
+            clean = plain(watch_screen(q, 100, 14, lambda data: b"more" in data, utf8))
+            self.assertIn("... 2 more", clean)
+            self.assertNotIn("xxx", clean)
+            row = clean.split("RUNNING 1", 1)[1].splitlines()[2]
+            self.assertRegex(row, r"^ +%s  \S" % re.escape(q.path.name + "/"))
+            for jobid, _ in q.rows()[1:]:
+                self.assertEqual(q.call("kill", jobid), (0, b"", b""))
+            gpu.communicate(timeout=3)
+            hidden.communicate(timeout=3)
+            q.release("narrow")
             self.assertEqual(job.wait(timeout=3), 0)
 
     @unittest.skipUnless(sys.platform == "darwin", "macOS caffeinate only")

@@ -324,7 +324,7 @@ static void card(const struct Job_view *v, int section, int width, int id_width,
      * the timing, so the resources stay on screen as long as they can. */
     int time_width = width - 1 - indent - dir_width - 4 - resource_width - tag_width;
     if (time_width < 24) time_width = width - 1 - indent - dir_width - 4 - resource_width;
-    if (time_width < 8) time_width = 8;
+    if (time_width < 0) time_width = 0;
     if (time_width > 40) time_width = 40;
     int ok = section == 2 && succeeded(v), quiet = ok;
     const char *id_style = section == 0 ? RUN_COLOUR : section == 1 ? QUEUE_COLOUR :
@@ -377,11 +377,6 @@ static void draw_cards(const struct Snapshot *snapshot, int width, int height)
         for (int j = 0; j < 3; ++j) if (v->state == states[j]) ++counts[j];
         int n = snprintf(text, sizeof(text), "%d", v->jobid);
         if (n > id_width) id_width = n;
-        n = text_columns(v->label) + 1;
-        if (n > dir_need) dir_need = n;
-        /* Room for "  #tag", up to 24 columns, when any job has a tag. */
-        n = v->tag[0] ? 3 + text_columns(v->tag) : 0;
-        if (n > tag_width) tag_width = n > 24 ? 24 : n;
     }
     header(snapshot, width, &row, height);
     /* Three header rows, a blank row and a heading per section, and the
@@ -396,6 +391,19 @@ static void draw_cards(const struct Snapshot *snapshot, int width, int height)
                 ++shown[j]; spare -= 2; progress = 1;
             }
         if (!progress) break;
+    }
+    /* Size the directory and tag columns from the cards on screen only, so a
+     * job counted in "... N more" takes no room. */
+    int seen[3] = {0};
+    for (size_t i = 0; i < snapshot->count; ++i) {
+        const struct Job_view *v = &snapshot->jobs[i];
+        int j = v->state == RUNNING ? 0 : v->state == QUEUED ? 1 : v->state == FINISHED ? 2 : -1;
+        if (j < 0 || seen[j]++ >= shown[j]) continue;
+        int n = text_columns(v->label) + 1;
+        if (n > dir_need) dir_need = n;
+        /* Room for "  #tag", up to 24 columns. */
+        n = v->tag[0] ? 3 + text_columns(v->tag) : 0;
+        if (n > tag_width) tag_width = n > 24 ? 24 : n;
     }
     for (int section = 0; section < 3; ++section) {
         struct row r;
