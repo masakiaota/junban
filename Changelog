@@ -16,9 +16,17 @@ v0.2.0 (adds GPUs as a second resource; changes ls and notice output):
    CPU job may pass a job that waits only for the GPU, and a job that
    needs all CPUs still keeps everything behind it waiting.
  - ls shows gpus=N on every line, ls --summary and watch show
-   gpus BUSY/TOTAL, and watch has a GPUS column. The wait notice says
-   gpus=N and whether the job waits for cpus, gpus or both.
- - The protocol version is now 735, so stop a running older server with
+   gpus BUSY/TOTAL, and the narrow watch table has a GPUS column. The
+   wait notice says gpus=N and whether the job waits for cpus, gpus or
+   both.
+ - watch shows CPU and GPU gauges and gives each job two rows: its ID and
+   full command, then its directory (blue, ending in /), timing with a
+   progress bar against the estimate, the CPUs and GPUs it holds, and its
+   tag. Finished jobs show a check or a cross, the result and the clock
+   time they ended. Colour marks meaning only, NO_COLOR turns it off, and
+   a non-UTF-8 locale gets ASCII. Terminals under 64 columns keep the
+   one-row table. ls still cuts the command at 80 bytes.
+ - The protocol version is now 736, so stop a running older server with
    junban shutdown after upgrading.
 
 v0.1.1 (changes junban ls output and exit status for scripts):

@@ -100,6 +100,20 @@ void fit_columns(char *dst, size_t size, const char *src, int columns, int pad)
     dst[used] = 0;
 }
 
+/* Terminal columns of a string; invalid bytes count as one, like '?'. */
+int text_columns(const char *src)
+{
+    const unsigned char *s = (const unsigned char *)src;
+    int width = 0;
+    while (*s) {
+        unsigned code;
+        int n = utf8_char(s, &code);
+        width += n ? char_columns(code) : 1;
+        s += n ? n : 1;
+    }
+    return width;
+}
+
 static void safe_text(char *dst, size_t size, const char *src, int label)
 {
     size_t used = 0;
@@ -150,6 +164,7 @@ void job_view(const struct Job *job, struct Job_view *view)
     view->waited = (job->started_at ? job->started_at : now) - job->queued_at;
     if (job->started_at)
         view->elapsed = (job->finished_at ? job->finished_at : now) - job->started_at;
+    if (job->finished_at) view->ended = (long long)time(NULL) - (long long)(now - job->finished_at);
     safe_text(view->label, sizeof(view->label), job->label, 1);
     if (job->tag) safe_text(view->tag, sizeof(view->tag), job->tag, 1);
     if (job->log) safe_text(view->log, sizeof(view->log), job->log, 1);
@@ -274,7 +289,10 @@ int print_snapshot(const struct Snapshot *snapshot)
             printf(" %s", status);
         }
         if (v->log[0]) printf(" log=%s", v->log);
-        printf(" cmd=%s\n", v->command);
+        /* ls keeps its 80-byte command; watch has room for the wider one. */
+        char command[81];
+        safe_text(command, sizeof(command), v->command, 0);
+        printf(" cmd=%s\n", command);
         ++printed;
     }
     return printed;

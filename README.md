@@ -148,17 +148,28 @@ $ junban ls -a --dir demo
 For people, `junban watch` is easier to read. The screen refreshes every two seconds. Press `q` to quit.
 
 ```text
-junban  cpus 3/4 [####################-------] gpus 0/1 running 1 queued 1 q:quit
-RUNNING
- ID DIR              CPUS GPUS ELAPSED EST      COMMAND
-  1 AHC075-b            3    0 1s      1s OVER  sleep 30
-QUEUED
- ID DIR              CPUS GPUS WAITED  EST      COMMAND
-  2 AHC075-a          all    0 1s      5m       true
+junban                                                         14:32:05  q:quit
+ CPU ████████████████████████████████████░░░░░░░░░░░░  3/4   running 2
+ GPU ████████████████████████████████████████████████  1/1   queued  1
+
+RUNNING 2
+  1  python train.py --lr 0.1 --epochs 50
+     AHC075-b/         12m / 30m ━━━━─────── 18m left  cpus 2 gpus 1  #sweep
+  3  sleep 30
+     AHC075-a/         45s / 30s ━━━━━━━━━━ OVER +15s  cpus 1
+
+QUEUED 1
+  4  python eval.py --ckpt best.pt
+     AHC075-b/         waited 40s                      cpus 1 gpus 1  #sweep
+
 DONE
- ID DIR              CPUS GPUS ELAPSED RESULT      COMMAND
-  0 AHC075-a          all    0 0s      exit=0      true
+✗ 2  pytest -x
+     AHC075-a/         exit 1   42s  ended 14:25
+✓ 0  true
+     AHC075-a/         ok       0s  ended 14:20
 ```
+
+Each job takes two rows: its ID and command, then its directory, timing, the CPUs and GPUs it holds, and its tag. A running job with an estimate shows a progress bar and the time left, or `OVER` once past it. A finished job shows `✓` or `✗`, its result, and the time it ended. Colour marks meaning only: CPUs are cyan, GPUs magenta, directories blue, and anything wrong red. `NO_COLOR=1` turns colour off, and without a UTF-8 locale the screen uses ASCII only. A terminal narrower than 64 columns gets a one-row table instead.
 
 ### Stop a job
 

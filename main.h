@@ -7,13 +7,14 @@
 */
 enum
 {
-    PROTOCOL_VERSION=735
+    PROTOCOL_VERSION=736
 };
 
 /* Retired message numbers and fields are reserved to preserve the 40-byte
  * frame. No retired request has a handler. Version 734 adds the job tag
  * and the detached job's log path to the NEWJOB payload and to Job_view.
- * Version 735 adds the GPU count of a job and of the queue. */
+ * Version 735 adds the GPU count of a job and of the queue. Version 736
+ * widens the Job_view command to 256 bytes and adds its wall-clock end. */
 enum msg_types
 {
     KILL_SERVER,
@@ -189,10 +190,11 @@ struct Job_view {
     int jobid, state, cpus, gpus, unspecified, killed, client_lost, status, signal;
     double elapsed, waited;
     unsigned long long estimate;
+    long long ended; /* Wall-clock end, in seconds since the epoch; 0 if none. */
     char label[128];
     char tag[64];
     char log[512];
-    char command[81];
+    char command[257];
 };
 
 struct Snapshot {
@@ -206,6 +208,7 @@ double monotime(void);
 void format_duration(char *dst, size_t size, unsigned long long seconds);
 void job_view(const struct Job *job, struct Job_view *view);
 void fit_columns(char *dst, size_t size, const char *src, int columns, int pad);
+int text_columns(const char *src);
 void view_cpus(const struct Job_view *view, char *dst, size_t size);
 void view_fields(const struct Job_view *view, char *dst, size_t size);
 void view_status(const struct Job_view *view, char *dst, size_t size);

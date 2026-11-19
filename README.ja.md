@@ -148,17 +148,28 @@ $ junban ls -a --dir demo
 人間が見るときは `junban watch` が便利です。画面が2秒ごとに更新されます。`q` で終了します。
 
 ```text
-junban  cpus 3/4 [####################-------] gpus 0/1 running 1 queued 1 q:quit
-RUNNING
- ID DIR              CPUS GPUS ELAPSED EST      COMMAND
-  1 AHC075-b            3    0 1s      1s OVER  sleep 30
-QUEUED
- ID DIR              CPUS GPUS WAITED  EST      COMMAND
-  2 AHC075-a          all    0 1s      5m       true
+junban                                                         14:32:05  q:quit
+ CPU ████████████████████████████████████░░░░░░░░░░░░  3/4   running 2
+ GPU ████████████████████████████████████████████████  1/1   queued  1
+
+RUNNING 2
+  1  python train.py --lr 0.1 --epochs 50
+     AHC075-b/         12m / 30m ━━━━─────── 18m left  cpus 2 gpus 1  #sweep
+  3  sleep 30
+     AHC075-a/         45s / 30s ━━━━━━━━━━ OVER +15s  cpus 1
+
+QUEUED 1
+  4  python eval.py --ckpt best.pt
+     AHC075-b/         waited 40s                      cpus 1 gpus 1  #sweep
+
 DONE
- ID DIR              CPUS GPUS ELAPSED RESULT      COMMAND
-  0 AHC075-a          all    0 0s      exit=0      true
+✗ 2  pytest -x
+     AHC075-a/         exit 1   42s  ended 14:25
+✓ 0  true
+     AHC075-a/         ok       0s  ended 14:20
 ```
+
+ジョブ1件は2行で表示されます。1行目はIDとコマンド、2行目はディレクトリ、時間、使っているCPUとGPU、タグです。見積もりのある実行中ジョブには進捗バーと残り時間が出て、見積もりを超えると `OVER` になります。終わったジョブには `✓` か `✗`、結果、終了時刻が出ます。色は意味を表すときだけ使います。CPUはシアン、GPUはマゼンタ、ディレクトリは青、異常は赤です。`NO_COLOR=1` で色を消せます。UTF-8のロケールでなければASCIIだけで表示します。幅が64桁未満の端末では、1行の表で表示します。
 
 ### ジョブを止める
 
