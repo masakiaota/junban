@@ -164,7 +164,7 @@ void job_view(const struct Job *job, struct Job_view *view)
     view->waited = (job->started_at ? job->started_at : now) - job->queued_at;
     if (job->started_at)
         view->elapsed = (job->finished_at ? job->finished_at : now) - job->started_at;
-    if (job->finished_at) view->ended = (long long)time(NULL) - (long long)(now - job->finished_at);
+    view->ended = job->finished_wall;
     safe_text(view->label, sizeof(view->label), job->label, 1);
     if (job->tag) safe_text(view->tag, sizeof(view->tag), job->tag, 1);
     if (job->log) safe_text(view->log, sizeof(view->log), job->log, 1);

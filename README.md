@@ -169,7 +169,7 @@ DONE
      AHC075-a/         ok       0s  ended 14:20
 ```
 
-Each job takes two rows: its ID and command, then its directory, timing, the CPUs and GPUs it holds, and its tag. A running job with an estimate shows a progress bar and the time left, or `OVER` once past it. A finished job shows `✓` or `✗`, its result, and the time it ended. Colour marks meaning only: CPUs are cyan, GPUs magenta, directories blue, and anything wrong red. `NO_COLOR=1` turns colour off, and without a UTF-8 locale the screen uses ASCII only. A terminal narrower than 64 columns gets a one-row table instead.
+Each job takes two rows: its ID and command, then its directory, timing, the CPUs and GPUs it holds, and its tag. A running job with an estimate shows a progress bar and the time left, or `OVER` once past it. A finished job shows `✓` or `✗`, its result, and the time it ended. Colour marks meaning only: CPUs are cyan, GPUs magenta, directories blue, and anything wrong red. `NO_COLOR=1` turns colour off, and without a UTF-8 locale the screen uses ASCII only, with `?` for each non-ASCII character in job text. A terminal narrower than 64 columns gets a one-row table instead.
 
 ### Stop a job
 

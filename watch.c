@@ -359,8 +359,16 @@ static void timing(struct row *r, const struct Job_view *v, int section, int end
         format_duration(text, sizeof(text), left);
         snprintf(tail, sizeof(tail), "%s left", text);
     }
-    put(r, over ? WRONG : "", elapsed);
+    /* Stay inside the timing field so the resources after it stay visible:
+     * drop "/ EST" first, then the elapsed time, when they do not fit. */
     snprintf(text, sizeof(text), " / %s ", estimate);
+    int room = end - r->columns, saved_limit = r->limit;
+    if ((int)(strlen(elapsed) + strlen(text) + strlen(tail)) > room)
+        snprintf(text, sizeof(text), " ");
+    if ((int)(strlen(elapsed) + strlen(text) + strlen(tail)) <= room)
+        put(r, over ? WRONG : "", elapsed);
+    else
+        text[0] = 0;
     put(r, MUTED, text);
     int bars = end - r->columns - 1 - (int)strlen(tail);
     if (bars > 20) bars = 20;
@@ -370,7 +378,21 @@ static void timing(struct row *r, const struct Job_view *v, int section, int end
         repeat(r, MUTED, use_utf8 ? "─" : "-", bars - filled);
         put(r, "", " ");
     }
+    if (end < r->limit) r->limit = end;
     put(r, over ? WRONG : "", tail);
+    r->limit = saved_limit;
+}
+
+/* Without UTF-8, every multibyte character in job text becomes one "?", so
+ * the screen stays ASCII and each byte is one column. */
+static void ascii_only(char *s)
+{
+    char *out = s;
+    for (const unsigned char *c = (const unsigned char *)s; *c; ++c) {
+        if (*c < 0x80) *out++ = (char)*c;
+        else if ((*c & 0xC0) != 0x80) *out++ = '?';
+    }
+    *out = 0;
 }
 
 /* Each job takes two rows: its ID and command, then where it runs, its
@@ -533,6 +555,13 @@ void c_watch(void)
                 error("queue disconnected while watching");
             }
             if (watch_stopping) break;
+            for (size_t i = 0; !use_utf8 && i < snapshot.count; ++i) {
+                struct Job_view *v = &snapshot.jobs[i];
+                ascii_only(v->label);
+                ascii_only(v->tag);
+                ascii_only(v->log);
+                ascii_only(v->command);
+            }
             /* Read the entire reply before the first stdout write too. */
             if (!screen_active) {
                 screen_active = 1;

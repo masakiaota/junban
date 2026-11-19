@@ -179,6 +179,7 @@ struct Job
     int client_lost;
     unsigned long long estimate;
     double queued_at, started_at, finished_at;
+    long long finished_wall; /* Wall-clock end, captured once. */
     int finish_pending;
     int stop_kill_sent;
     double stop_deadline;

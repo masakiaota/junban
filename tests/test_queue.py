@@ -1553,7 +1553,7 @@ class VisibilityOnlyTests(unittest.TestCase):
     def test_watch_cards(self):
         with Queue() as q:
             self.assertEqual(q.call("run", "sh", "-c", "exit 3")[0], 3)
-            self.assertEqual(q.call("run", "true")[0], 0)
+            self.assertEqual(q.call("run", "true", "日本")[0], 0)
             job = q.start("cards", 2, gpus=1, estimate="1h", tag="sweep")
             q.pids("cards")
             waiting = q.start("cards-wait")
@@ -1571,7 +1571,7 @@ class VisibilityOnlyTests(unittest.TestCase):
             queued = clean.split("QUEUED 1", 1)[1].splitlines()
             self.assertRegex(queued[2], r"waited \S+ +cpus all$")
             done = clean.split("DONE", 1)[1].splitlines()
-            self.assertRegex(done[1], r"^✓ +1  true$")
+            self.assertRegex(done[1], r"^✓ +1  true 日本$")
             self.assertRegex(done[2], r" ok +\S+  ended \d\d:\d\d$")
             self.assertRegex(done[3], r"^✗ +0  sh -c exit 3$")
             self.assertIn(b"\x1b[1;31mexit 3", screen)
@@ -1580,7 +1580,8 @@ class VisibilityOnlyTests(unittest.TestCase):
             screen = watch_screen(q, 100, 30, lambda data: b"ended" in data, ascii_env)
             self.assertNotRegex(screen, rb"\x1b\[[0-9;]*m")
             self.assertTrue(all(byte < 0x80 for byte in screen), screen)
-            self.assertRegex(screen, rb"\n\+ +1  true")
+            # Each non-ASCII character in job text shows as one "?".
+            self.assertRegex(screen, rb"\n\+ +1  true \?\?\x1b\[K")
             self.assertRegex(screen, rb"\n! +0  sh -c exit 3")
             # The command uses the whole row, past the 80 bytes ls keeps.
             command = "%s %s hold cards.pids cards.release" % (PY, WORKER)

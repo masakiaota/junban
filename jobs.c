@@ -228,6 +228,7 @@ int s_newjob(int s, struct msg *m)
     p->estimate = 0;
     p->queued_at = monotime();
     p->started_at = p->finished_at = 0;
+    p->finished_wall = 0;
     memset(&p->result, 0, sizeof(p->result));
     p->client_lost = 0;
     p->finish_pending = p->stop_kill_sent = 0;
@@ -425,6 +426,7 @@ void job_finished(const struct Result *result, int jobid)
     p->state = FINISHED;
     p->result = *result;
     p->finished_at = monotime();
+    p->finished_wall = (long long)time(NULL);
 
     /* Find the pointing node, to
      * update it removing the finished job. */

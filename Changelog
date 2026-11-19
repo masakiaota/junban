@@ -24,8 +24,9 @@ v0.2.0 (adds GPUs as a second resource; changes ls and notice output):
    progress bar against the estimate, the CPUs and GPUs it holds, and its
    tag. Finished jobs show a check or a cross, the result and the clock
    time they ended. Colour marks meaning only, NO_COLOR turns it off, and
-   a non-UTF-8 locale gets ASCII. Terminals under 64 columns keep the
-   one-row table. ls still cuts the command at 80 bytes.
+   a non-UTF-8 locale gets ASCII, with "?" for each non-ASCII character in
+   job text. Terminals under 64 columns keep the one-row table. ls still
+   cuts the command at 80 bytes.
  - The protocol version is now 736, so stop a running older server with
    junban shutdown after upgrading.
 
