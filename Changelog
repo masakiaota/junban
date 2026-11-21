@@ -7,22 +7,16 @@ idle-sleep prevention. Removed the old command-line interface and obsolete
 packaging, output capture, mail, dependencies, and queue-reordering features.
 
 v0.3.0 (backfilling with estimates):
- - A job behind a waiting job may start first so that CPUs and GPUs are
-   not left idle. A job with an estimate may borrow what is free if, by
-   its estimate, it ends before the first waiting job could start. That
-   time comes from the estimates of the running jobs; a running job past
-   its estimate counts as ending at any moment, and nothing borrows while
-   the first waiting job needs what a job without an estimate holds. Any
-   job, with or without an estimate, may also take what the waiting jobs
-   could not use whichever running jobs end first, which delays no one.
-   So a CPU job may now take a free CPU while a job ahead waits for the
-   GPU, if that job gets a CPU back from the GPU job it waits for.
- - A job without an estimate never passes a waiting job on time alone,
-   and a job that needs all CPUs still runs alone. With no estimates the
-   order is as before.
+ - A job with an estimate may start ahead of waiting jobs in the free
+   CPUs and GPUs if, by its estimate, it ends before the first waiting
+   job could start. That time comes from the estimates of the running
+   jobs; a job past its estimate counts as ending at once, and nothing
+   goes ahead while the first waiting job needs what a running job
+   without an estimate holds. Jobs without an estimate keep their turn,
+   so with no estimates the order is as before.
  - run --help and the READMEs say that an estimate lets a job start
    early and should not be shorter than expected.
- - No protocol change; a running 0.2.x server keeps working, but it keeps
+ - No protocol change; a running 0.2.x server keeps working, but keeps
    the old order until it is restarted.
 
 v0.2.1 (watch layout fixes):

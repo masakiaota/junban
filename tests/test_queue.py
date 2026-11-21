@@ -391,13 +391,16 @@ class QueueTests(unittest.TestCase):
             self.assertEqual(states(), {0: "running", 1: "queued", 2: "running"})
             self.assertEqual(q.call("ls", "--summary"),
                              (0, b"cpus 3/4 gpus 1/1 running 2 queued 1\n", b""))
-            # g2 can start only when g1 ends, and g1 then gives back a CPU,
-            # so a later one-CPU job may take the last free CPU now.
+            # g2 reserves the last free CPU, so a later one-CPU job waits.
             d = q.start("d", 1)
-            q.pids("d")
+            q.wait_rows(4)
+            time.sleep(0.15)
+            self.assertFalse((q.path / "d.pids").exists())
             q.release("g1")
             self.assertEqual(g1.wait(timeout=3), 0)
+            # g2 starts and its reservation goes, so d takes the last CPU.
             q.pids("g2")
+            q.pids("d")
             self.assertEqual(states(), {1: "running", 2: "running", 3: "running"})
             q.release("g2")
             self.assertEqual(g2.wait(timeout=3), 0)
@@ -469,105 +472,22 @@ class QueueTests(unittest.TestCase):
             self.assertEqual(d.wait(timeout=3), 0)
             self.assertEqual(e.wait(timeout=3), 0)
 
-    def test_backfill_without_estimate_takes_only_what_is_left_over(self):
+
+    def test_backfill_needs_estimates_of_the_running_jobs(self):
         with Queue(4) as q:
-            a = q.start("a", 2, estimate="1h")
+            a = q.start("a", 2)
             q.pids("a")
-            b = q.start("b", 3)
+            # b's start depends on a, which has no estimate, so nothing
+            # can be sure to end before it.
+            b = q.start("b")
             q.wait_rows(2)
-            # When a ends, four CPUs are free and b needs three, so one CPU
-            # is left over for good: c may take it now.
-            c = q.start("c", 1)
-            q.pids("c")
-            # d would leave b two CPUs when a ends, so it waits.
-            d = q.start("d", 1)
-            q.wait_rows(4)
-            time.sleep(0.15)
-            self.assertFalse((q.path / "b.pids").exists())
-            self.assertFalse((q.path / "d.pids").exists())
-            q.release("a")
-            self.assertEqual(a.wait(timeout=3), 0)
-            q.pids("b")
-            time.sleep(0.15)
-            self.assertFalse((q.path / "d.pids").exists())
-            for name, p in (("b", b), ("c", c)):
-                q.release(name)
-                self.assertEqual(p.wait(timeout=3), 0)
-            q.pids("d")
-            q.release("d")
-            self.assertEqual(d.wait(timeout=3), 0)
-
-    def test_backfill_leaves_room_for_an_overdue_job_ending(self):
-        with Queue(4) as q:
-            a = q.start("a", 1, estimate="1s")
-            q.pids("a")
-            time.sleep(1.3)
-            b = q.start("b", 2, estimate="1h")
-            q.pids("b")
-            # c needs two CPUs and gets them as soon as overdue a ends.
-            c = q.start("c", 2)
+            c = q.start("c", 1, estimate="1s")
             q.wait_rows(3)
-            # When b ends an hour from now one CPU is left over, but taking
-            # it now would keep c waiting after a ends, so d waits.
-            d = q.start("d", 1)
-            q.wait_rows(4)
             time.sleep(0.15)
-            self.assertFalse((q.path / "d.pids").exists())
-            q.release("a")
-            self.assertEqual(a.wait(timeout=3), 0)
-            q.pids("c")
-            time.sleep(0.15)
-            self.assertFalse((q.path / "d.pids").exists())
-            for name, p in (("b", b), ("c", c)):
-                q.release(name)
-                self.assertEqual(p.wait(timeout=3), 0)
-            q.pids("d")
-            q.release("d")
-            self.assertEqual(d.wait(timeout=3), 0)
-
-    def test_backfill_leaves_room_whichever_job_ends_first(self):
-        with Queue(5) as q:
-            a1 = q.start("a1", 1, estimate="1s")
-            q.pids("a1")
-            a2 = q.start("a2", 1, estimate="1s")
-            q.pids("a2")
-            time.sleep(1.3)
-            b = q.start("b", 2, estimate="1h")
-            q.pids("b")
-            c = q.start("c", 2)
-            q.wait_rows(4)
-            # If only a1 ends, c needs both CPUs then, so d waits.
-            d = q.start("d", 1)
-            q.wait_rows(5)
-            time.sleep(0.15)
-            self.assertFalse((q.path / "d.pids").exists())
-            q.release("a1")
-            self.assertEqual(a1.wait(timeout=3), 0)
-            q.pids("c")
-            for name, p in (("a2", a2), ("b", b), ("c", c)):
-                q.release(name)
-                self.assertEqual(p.wait(timeout=3), 0)
-            q.pids("d")
-            q.release("d")
-            self.assertEqual(d.wait(timeout=3), 0)
-
-    def test_backfill_with_jobs_taking_turns_on_the_gpu(self):
-        with Queue(4) as q:
-            g0 = q.start("g0", 1, gpus=1)
-            q.pids("g0")
-            g1 = q.start("g1", 1, gpus=1)
-            q.wait_rows(2)
-            g2 = q.start("g2", 1, gpus=1)
-            q.wait_rows(3)
-            # g1 and g2 take turns on the GPU but hold a CPU each. Once g0
-            # ends, four CPUs are free and they need two, so x may take two
-            # of the three free CPUs now.
-            x = q.start("x", 2)
-            q.pids("x")
-            q.release("g0")
-            self.assertEqual(g0.wait(timeout=3), 0)
-            for name, p in (("g1", g1), ("g2", g2), ("x", x)):
-                q.pids(name)
+            self.assertFalse((q.path / "c.pids").exists())
+            for name, p in (("a", a), ("b", b), ("c", c)):
+                if name != "a":
+                    q.pids(name)
                 q.release(name)
                 self.assertEqual(p.wait(timeout=3), 0)
 
@@ -592,6 +512,7 @@ class QueueTests(unittest.TestCase):
                 q.pids(name)
                 q.release(name)
                 self.assertEqual(p.wait(timeout=3), 0)
+
 
     def test_parallel_slots(self):
         with Queue() as q:
