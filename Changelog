@@ -6,6 +6,19 @@ agent-readable listings and wait notifications, a terminal watch view, and macOS
 idle-sleep prevention. Removed the old command-line interface and obsolete
 packaging, output capture, mail, dependencies, and queue-reordering features.
 
+v0.3.0 (backfilling with estimates):
+ - A job with an estimate may start ahead of waiting jobs in the free
+   CPUs and GPUs if, by its estimate, it ends before the first waiting
+   job could start. That time comes from the estimates of the running
+   jobs; a job past its estimate counts as ending at once, and nothing
+   goes ahead while the first waiting job needs what a running job
+   without an estimate holds. Jobs without an estimate keep their turn,
+   so with no estimates the order is as before.
+ - run --help and the READMEs say that an estimate lets a job start
+   early and should not be shorter than expected.
+ - No protocol change; a running 0.2.x server keeps working, but keeps
+   the old order until it is restarted.
+
 v0.2.1 (watch layout fixes):
  - watch sizes the directory column to the names on screen, up to 32
    columns, so names over 16 columns are no longer cut early. Space goes
