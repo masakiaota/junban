@@ -431,6 +431,96 @@ class QueueTests(unittest.TestCase):
             q.release("h")
             self.assertEqual(h.wait(timeout=3), 0)
 
+    def test_backfill_borrows_until_the_first_waiting_job_can_start(self):
+        with Queue(4) as q:
+            def states():
+                return dict(q.rows())
+            a = q.start("a", 2, estimate="1h")
+            q.pids("a")
+            b = q.start("b")  # all CPUs; can start when a ends in an hour
+            q.wait_rows(2)
+            # c ends before b could start, so it borrows the free CPUs.
+            c = q.start("c", 2, estimate="10m")
+            q.pids("c")
+            # d has no estimate and could hold b's CPUs for good, so it waits.
+            d = q.start("d", 2)
+            q.wait_rows(4)
+            q.release("c")
+            self.assertEqual(c.wait(timeout=3), 0)
+            # e would still run when b could start; f would not.
+            e = q.start("e", 1, estimate="2h")
+            f = q.start("f", 1, estimate="5m")
+            q.pids("f")
+            time.sleep(0.15)
+            self.assertEqual(states(), {0: "running", 1: "queued", 3: "queued",
+                                        4: "queued", 5: "running"})
+            for name in ("d", "e"):
+                self.assertFalse((q.path / (name + ".pids")).exists())
+            q.release("f")
+            q.release("a")
+            self.assertEqual(f.wait(timeout=3), 0)
+            self.assertEqual(a.wait(timeout=3), 0)
+            q.pids("b")
+            self.assertEqual(states(), {1: "running", 3: "queued", 4: "queued"})
+            q.release("b")
+            self.assertEqual(b.wait(timeout=3), 0)
+            q.pids("d")
+            q.pids("e")
+            q.release("d")
+            q.release("e")
+            self.assertEqual(d.wait(timeout=3), 0)
+            self.assertEqual(e.wait(timeout=3), 0)
+
+    def test_backfill_without_estimate_takes_only_what_is_left_over(self):
+        with Queue(4) as q:
+            a = q.start("a", 2, estimate="1h")
+            q.pids("a")
+            b = q.start("b", 3)
+            q.wait_rows(2)
+            # When a ends, four CPUs are free and b needs three, so one CPU
+            # is left over for good: c may take it now.
+            c = q.start("c", 1)
+            q.pids("c")
+            # d would leave b two CPUs when a ends, so it waits.
+            d = q.start("d", 1)
+            q.wait_rows(4)
+            time.sleep(0.15)
+            self.assertFalse((q.path / "b.pids").exists())
+            self.assertFalse((q.path / "d.pids").exists())
+            q.release("a")
+            self.assertEqual(a.wait(timeout=3), 0)
+            q.pids("b")
+            time.sleep(0.15)
+            self.assertFalse((q.path / "d.pids").exists())
+            for name, p in (("b", b), ("c", c)):
+                q.release(name)
+                self.assertEqual(p.wait(timeout=3), 0)
+            q.pids("d")
+            q.release("d")
+            self.assertEqual(d.wait(timeout=3), 0)
+
+    def test_backfill_stops_when_a_job_overruns(self):
+        with Queue(4) as q:
+            a = q.start("a", 2, estimate="1s")
+            q.pids("a")
+            time.sleep(1.3)
+            # a is past its estimate, so it may end any moment and b could
+            # start then. Nothing borrows the free CPUs.
+            b = q.start("b")
+            q.wait_rows(2)
+            c = q.start("c", 2, estimate="1h")
+            d = q.start("d", 1, estimate="1s")
+            q.wait_rows(4)
+            time.sleep(0.15)
+            for name in ("b", "c", "d"):
+                self.assertFalse((q.path / (name + ".pids")).exists())
+            q.release("a")
+            self.assertEqual(a.wait(timeout=3), 0)
+            for name, p in (("b", b), ("c", c), ("d", d)):
+                q.pids(name)
+                q.release(name)
+                self.assertEqual(p.wait(timeout=3), 0)
+
     def test_parallel_slots(self):
         with Queue() as q:
             a, b = q.start("a", 3), q.start("b", 1)
@@ -858,7 +948,7 @@ class VisibilityOnlyTests(unittest.TestCase):
                            "ls     0 if it listed a job, 1 if it listed none"):
                 self.assertIn(phrase, text)
             self.assertLessEqual(max(map(len, text.splitlines())), 100)
-            self.assertEqual(q.call("version")[1], b"junban 0.2.1 (based on task-spooler 1.0.4)\n")
+            self.assertEqual(q.call("version")[1], b"junban 0.3.0 (based on task-spooler 1.0.4)\n")
             self.assertEqual(q.call("ls", "--summary"), (0, b"cpus 0/4 gpus 0/1 running 0 queued 0\n", b""))
             for args in (["--summary", "-a"], ["-a", "-a"], ["--summary", "--summary"]):
                 self.own_failure(q.call("ls", *args))

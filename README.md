@@ -104,6 +104,8 @@ $ junban run -c 8 --estimate 2h python train.py
 
 The estimate is shown to jobs that are waiting. A job is never stopped for running past its estimate.
 
+A job with an estimate can start ahead of waiting jobs when, by its estimate, it ends before they could start (see [Good to know](#good-to-know)). Give an estimate whenever you can, and do not make it shorter than you expect: a job that runs past its estimate delays the jobs it went ahead of.
+
 ### Tag your jobs
 
 `--tag` puts a tag on a job, so you can treat your jobs as a group. If the environment variable `JUNBAN_TAG` is set, jobs get that tag without `--tag`. Set it once per agent session and its jobs are grouped automatically. A tag is 1 to 63 characters from `A-Z a-z 0-9 . _ : @ + -`.
@@ -183,7 +185,11 @@ If you interrupt `junban run` itself, with Ctrl-C for example, the command it is
 
 ## Good to know
 
-- Jobs start in the order they were submitted, for each of CPUs and GPUs. A waiting job holds on to the CPUs and GPUs it asks for, so a job behind it starts only if it fits in what is left. A CPU job can therefore start while a GPU job ahead of it waits for the GPU, but never takes a CPU that job is waiting for. A job that needs all CPUs holds them all, so nothing behind it starts first. This keeps a large job from waiting forever while small jobs keep going ahead of it.
+- Jobs start in the order they were submitted, for each of CPUs and GPUs. A waiting job holds on to the CPUs and GPUs it asks for, so a job behind it starts only if it fits in what is left. A CPU job can therefore start while a GPU job ahead of it waits for the GPU. So that CPUs are not left idle while a large job waits, a job behind may also start first in two cases. Either way, the first waiting job starts no later than the estimates of the running jobs say it can.
+  - It has an estimate, and by that estimate it ends before the first waiting job could start. junban works that time out from the estimates of the running jobs. A running job past its estimate is taken to end at any moment, so it makes this harder. If the first waiting job needs what a job without an estimate holds, no job starts first this way.
+  - It fits in the CPUs and GPUs that the waiting jobs will not need even once the running jobs with estimates have ended. Such a job needs no estimate.
+
+  A job without an estimate therefore never passes a waiting job on time alone, and a job that needs all CPUs still never runs alongside another job. This keeps a large job from waiting forever while small jobs keep going ahead of it.
 - `junban run a && b` puts only `a` in the queue. To queue both, write `junban run sh -c 'a && b'`.
 - You cannot call `junban run` from inside a job that junban is running. It fails with an error (exit status 125). This keeps a job from waiting for itself and blocking the queue.
 - If a command exits and leaves child processes running in the background, `junban run` does not return until they finish.
@@ -199,7 +205,9 @@ Put something like this in `AGENTS.md` or `CLAUDE.md`:
 - Give the number of CPUs with -c, counting threads and child processes.
 - Run benchmarks that measure run time without -c.
 - Give -g 1 to jobs that use the GPU. Give -c as well, for example -c 1 -g 1.
-- When you can guess how long a job will take, say so with --estimate.
+- When you can guess how long a job will take, say so with --estimate. A job
+  with an estimate can start early in idle CPUs. Do not give a shorter time
+  than you expect.
 - junban run in the foreground does not return until the job ends. To run jobs
   in parallel, start each with id=$(junban run --detach ...) and pass the IDs
   to junban wait. Its exit status is the highest exit status of the jobs.

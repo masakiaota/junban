@@ -271,40 +271,126 @@ disconnected:
     return -1;
 }
 
-/* Per-resource FIFO. Jobs are taken in queue order. A job that cannot
- * start reserves what it asks for, so a later job may start only within
- * what is left after every earlier queued job's reservation. A later job
- * therefore never takes a CPU or GPU an earlier job is waiting for, yet it
- * may pass a job that waits only for a resource it does not use. Every job
- * uses at least one CPU, so once the reservations cover all CPUs nothing
- * behind can start, which keeps a job that needs all CPUs from starving.
+/* The CPUs and GPUs a running job gives back at the end of its estimate. */
+struct Release {
+    double at;
+    int cpus, gpus;
+};
+
+static int release_order(const void *a, const void *b)
+{
+    double x = ((const struct Release *)a)->at, y = ((const struct Release *)b)->at;
+    return (x > y) - (x < y);
+}
+
+/* The earliest time at which cpus and gpus are free, counting only the
+ * given releases, or -1 if they never are by those. *cpus and *gpus get
+ * what is free at that time, or what is free now if the time is -1. */
+static double free_at(const struct Release *r, int n, double now, int *cpus, int *gpus)
+{
+    int need_cpus = *cpus, need_gpus = *gpus, i = 0;
+    double at = now;
+    *cpus = max_slots - busy_slots;
+    *gpus = max_gpus - busy_gpus;
+    while (*cpus < need_cpus || *gpus < need_gpus) {
+        if (i == n) {
+            *cpus = max_slots - busy_slots;
+            *gpus = max_gpus - busy_gpus;
+            return -1;
+        }
+        at = r[i].at;
+        for (; i < n && r[i].at == at; ++i) {
+            *cpus += r[i].cpus;
+            *gpus += r[i].gpus;
+        }
+    }
+    return at;
+}
+
+/* Per-resource FIFO with backfilling. Jobs are taken in queue order. A job
+ * that cannot start reserves what it asks for, so a later job may start
+ * within what is left after every earlier queued job's reservation. A later
+ * job may pass a job that waits only for a resource it does not use.
+ *
+ * Running jobs with an estimate are expected back at its end. A reservation
+ * needs only what those jobs will not have given back by the time the
+ * waiting jobs fit, so a later job may also take CPUs and GPUs the waiting
+ * jobs will not need then. A job without an estimate may keep them for
+ * good, and the waiting jobs still fit at that time.
+ *
+ * A later job with an estimate may also borrow any free CPUs and GPUs if it
+ * ends before the first waiting job could start. That start counts a job
+ * past its estimate as ending now, so an overrun makes borrowing harder. A
+ * job without an estimate, or one waiting on a job without one, never
+ * borrows. Every job uses at least one CPU, so once the reservations cover
+ * all CPUs and nothing may borrow, nothing behind can start, which keeps a
+ * job that needs all CPUs from starving.
+ *
  * Returns the job's remaining shortage in *short_cpus and *short_gpus when
  * stop is given and reached, for the wait notice. -1 if no one should run. */
 static int schedule(const struct Job *stop, int *short_cpus, int *short_gpus)
 {
     int free_cpus = max_slots - busy_slots, free_gpus = max_gpus - busy_gpus;
+    int spare_cpus = free_cpus, spare_gpus = free_gpus;
+    int need_cpus = 0, need_gpus = 0, blocked = 0, chosen = -1, sure = 0, soon = 0;
+    double now = monotime(), deadline = -1;
+    struct Release *sure_at, *soon_at;
     struct Job *p;
+    for (p = firstjob; p; p = p->next)
+        if (p->state == RUNNING && p->estimate) ++soon;
+    sure_at = malloc((size_t)(soon + 1) * sizeof(*sure_at));
+    soon_at = malloc((size_t)(soon + 1) * sizeof(*soon_at));
+    if (!sure_at || !soon_at) error("Cannot allocate memory in schedule");
+    soon = 0;
+    for (p = firstjob; p; p = p->next) {
+        double end;
+        if (p->state != RUNNING || !p->estimate) continue;
+        end = p->started_at + (double)p->estimate;
+        soon_at[soon++] = (struct Release){end > now ? end : now, p->num_slots, p->num_gpus};
+        if (end > now)
+            sure_at[sure++] = (struct Release){end, p->num_slots, p->num_gpus};
+    }
+    qsort(sure_at, (size_t)sure, sizeof(*sure_at), release_order);
+    qsort(soon_at, (size_t)soon, sizeof(*soon_at), release_order);
     /* The notice scans up to its job even when no CPU is left, so it also
      * sees the GPUs that earlier jobs reserve. */
-    for (p = firstjob; p != 0 && (stop || free_cpus > 0); p = p->next) {
+    for (p = firstjob; p != 0; p = p->next) {
+        int cpus, gpus;
         if (p->state != QUEUED) continue;
         /* A job being killed in the queue keeps its reservation until it goes. */
         int fits = !p->kill_requested && p->num_slots <= free_cpus &&
-                   p->num_gpus <= free_gpus;
+                   p->num_gpus <= free_gpus &&
+                   ((p->num_slots <= spare_cpus && p->num_gpus <= spare_gpus) ||
+                    (deadline >= 0 && p->estimate && now + (double)p->estimate <= deadline));
         if (p == stop) {
-            *short_cpus = p->num_slots > free_cpus;
-            *short_gpus = p->num_gpus > free_gpus;
-            return -1;
+            *short_cpus = p->num_slots > spare_cpus;
+            *short_gpus = p->num_gpus > spare_gpus;
+            break;
         }
         if (fits && !stop) {
             busy_slots = busy_slots + p->num_slots;
             busy_gpus = busy_gpus + p->num_gpus;
-            return p->jobid;
+            chosen = p->jobid;
+            break;
         }
-        free_cpus = free_cpus > p->num_slots ? free_cpus - p->num_slots : 0;
-        free_gpus = free_gpus > p->num_gpus ? free_gpus - p->num_gpus : 0;
+        need_cpus += p->num_slots;
+        need_gpus += p->num_gpus;
+        cpus = need_cpus;
+        gpus = need_gpus;
+        free_at(sure_at, sure, now, &cpus, &gpus);
+        if (cpus - need_cpus < spare_cpus) spare_cpus = cpus > need_cpus ? cpus - need_cpus : 0;
+        if (gpus - need_gpus < spare_gpus) spare_gpus = gpus > need_gpus ? gpus - need_gpus : 0;
+        if (!blocked) {
+            cpus = p->num_slots;
+            gpus = p->num_gpus;
+            deadline = free_at(soon_at, soon, now, &cpus, &gpus);
+            blocked = 1;
+        }
+        if (!stop && spare_cpus == 0 && deadline < 0) break;
     }
-    return -1;
+    free(sure_at);
+    free(soon_at);
+    return chosen;
 }
 
 int next_run_job()
