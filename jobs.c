@@ -315,8 +315,9 @@ static double free_at(const struct Release *r, int n, double now, int *cpus, int
  * Running jobs with an estimate are expected back at its end. A reservation
  * needs only what those jobs will not have given back by the time the
  * waiting jobs fit, so a later job may also take CPUs and GPUs the waiting
- * jobs will not need then. A job without an estimate may keep them for
- * good, and the waiting jobs still fit at that time.
+ * jobs will not need then, nor if the jobs past their estimates end first.
+ * A job without an estimate may keep them for good, and the waiting jobs
+ * still fit at either time.
  *
  * A later job with an estimate may also borrow any free CPUs and GPUs if it
  * ends before the first waiting job could start. That start counts a job
@@ -336,6 +337,8 @@ static int schedule(const struct Job *stop, int *short_cpus, int *short_gpus)
     double now = monotime(), deadline = -1;
     struct Release *sure_at, *soon_at;
     struct Job *p;
+    /* Every job uses at least one CPU, so with none free nothing starts. */
+    if (!stop && free_cpus <= 0) return -1;
     for (p = firstjob; p; p = p->next)
         if (p->state == RUNNING && p->estimate) ++soon;
     sure_at = malloc((size_t)(soon + 1) * sizeof(*sure_at));
@@ -375,11 +378,17 @@ static int schedule(const struct Job *stop, int *short_cpus, int *short_gpus)
         }
         need_cpus += p->num_slots;
         need_gpus += p->num_gpus;
-        cpus = need_cpus;
-        gpus = need_gpus;
-        free_at(sure_at, sure, now, &cpus, &gpus);
-        if (cpus - need_cpus < spare_cpus) spare_cpus = cpus > need_cpus ? cpus - need_cpus : 0;
-        if (gpus - need_gpus < spare_gpus) spare_gpus = gpus > need_gpus ? gpus - need_gpus : 0;
+        /* The waiting jobs first fit either once the jobs still within
+         * their estimates end, or as soon as the overdue ones end. Leave
+         * them enough at whichever of those has less free. */
+        for (int pass = 0; pass < 2; ++pass) {
+            cpus = need_cpus;
+            gpus = need_gpus;
+            if (pass) free_at(soon_at, soon, now, &cpus, &gpus);
+            else free_at(sure_at, sure, now, &cpus, &gpus);
+            if (cpus - need_cpus < spare_cpus) spare_cpus = cpus > need_cpus ? cpus - need_cpus : 0;
+            if (gpus - need_gpus < spare_gpus) spare_gpus = gpus > need_gpus ? gpus - need_gpus : 0;
+        }
         if (!blocked) {
             cpus = p->num_slots;
             gpus = p->num_gpus;

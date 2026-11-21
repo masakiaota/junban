@@ -449,6 +449,7 @@ class QueueTests(unittest.TestCase):
             self.assertEqual(c.wait(timeout=3), 0)
             # e would still run when b could start; f would not.
             e = q.start("e", 1, estimate="2h")
+            q.wait_rows(4)
             f = q.start("f", 1, estimate="5m")
             q.pids("f")
             time.sleep(0.15)
@@ -490,6 +491,34 @@ class QueueTests(unittest.TestCase):
             q.release("a")
             self.assertEqual(a.wait(timeout=3), 0)
             q.pids("b")
+            time.sleep(0.15)
+            self.assertFalse((q.path / "d.pids").exists())
+            for name, p in (("b", b), ("c", c)):
+                q.release(name)
+                self.assertEqual(p.wait(timeout=3), 0)
+            q.pids("d")
+            q.release("d")
+            self.assertEqual(d.wait(timeout=3), 0)
+
+    def test_backfill_leaves_room_for_an_overdue_job_ending(self):
+        with Queue(4) as q:
+            a = q.start("a", 1, estimate="1s")
+            q.pids("a")
+            time.sleep(1.3)
+            b = q.start("b", 2, estimate="1h")
+            q.pids("b")
+            # c needs two CPUs and gets them as soon as overdue a ends.
+            c = q.start("c", 2)
+            q.wait_rows(3)
+            # When b ends an hour from now one CPU is left over, but taking
+            # it now would keep c waiting after a ends, so d waits.
+            d = q.start("d", 1)
+            q.wait_rows(4)
+            time.sleep(0.15)
+            self.assertFalse((q.path / "d.pids").exists())
+            q.release("a")
+            self.assertEqual(a.wait(timeout=3), 0)
+            q.pids("c")
             time.sleep(0.15)
             self.assertFalse((q.path / "d.pids").exists())
             for name, p in (("b", b), ("c", c)):
