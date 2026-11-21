@@ -307,25 +307,55 @@ static double free_at(const struct Release *r, int n, double now, int *cpus, int
     return at;
 }
 
+/* Lower *spare_cpus and *spare_gpus to what the waiting jobs, needing
+ * need_cpus and need_gpus together, leave over whichever running jobs end
+ * first. back[c * (max_gpus + 1) + g] is set when some set of running jobs
+ * gives back c CPUs and g GPUs. The waiting jobs could next fit after any
+ * such set ends, so what they leave over is the least surplus of those
+ * sets after which they fit. They never all fit at once if they ask for
+ * more than there is, so the test caps what they ask for at the totals:
+ * jobs that wait for the one GPU take turns, but each keeps its CPUs.
+ * If no set lets them fit, they leave over only what they do not ask for
+ * now, as before backfilling. */
+static void leave_over(const char *back, int need_cpus, int need_gpus,
+                       int *spare_cpus, int *spare_gpus)
+{
+    int free_cpus = max_slots - busy_slots, free_gpus = max_gpus - busy_gpus;
+    int fit_cpus = need_cpus < max_slots ? need_cpus : max_slots;
+    int fit_gpus = need_gpus < max_gpus ? need_gpus : max_gpus;
+    int cpus = free_cpus - need_cpus, gpus = free_gpus - need_gpus, found = 0;
+    for (int c = 0; c <= busy_slots; ++c)
+        for (int g = 0; g <= busy_gpus; ++g) {
+            if (!back[c * (max_gpus + 1) + g] || free_cpus + c < fit_cpus ||
+                free_gpus + g < fit_gpus) continue;
+            if (!found || free_cpus + c - need_cpus < cpus) cpus = free_cpus + c - need_cpus;
+            if (!found || free_gpus + g - need_gpus < gpus) gpus = free_gpus + g - need_gpus;
+            found = 1;
+        }
+    if (cpus < 0) cpus = 0;
+    if (gpus < 0) gpus = 0;
+    if (cpus < *spare_cpus) *spare_cpus = cpus;
+    if (gpus < *spare_gpus) *spare_gpus = gpus;
+}
+
 /* Per-resource FIFO with backfilling. Jobs are taken in queue order. A job
  * that cannot start reserves what it asks for, so a later job may start
  * within what is left after every earlier queued job's reservation. A later
  * job may pass a job that waits only for a resource it does not use.
  *
- * Running jobs with an estimate are expected back at its end. A reservation
- * needs only what those jobs will not have given back by the time the
- * waiting jobs fit, so a later job may also take CPUs and GPUs the waiting
- * jobs will not need then, nor if the jobs past their estimates end first.
- * A job without an estimate may keep them for good, and the waiting jobs
- * still fit at either time.
+ * A reservation needs only what the waiting jobs can use. Running jobs may
+ * end in any order, so a later job may take the CPUs and GPUs the waiting
+ * jobs would leave over whichever of them end first. Such a job needs no
+ * estimate and may keep them for good without delaying anyone.
  *
  * A later job with an estimate may also borrow any free CPUs and GPUs if it
- * ends before the first waiting job could start. That start counts a job
- * past its estimate as ending now, so an overrun makes borrowing harder. A
- * job without an estimate, or one waiting on a job without one, never
- * borrows. Every job uses at least one CPU, so once the reservations cover
- * all CPUs and nothing may borrow, nothing behind can start, which keeps a
- * job that needs all CPUs from starving.
+ * ends before the first waiting job could start by the estimates of the
+ * running jobs. That start counts a job past its estimate as ending now, so
+ * an overrun makes borrowing harder. A job without an estimate, or one
+ * waiting on a job without one, never borrows. Every job uses at least one
+ * CPU, so once the reservations cover all CPUs and nothing may borrow,
+ * nothing behind can start, which keeps a job that needs all CPUs from
+ * starving.
  *
  * Returns the job's remaining shortage in *short_cpus and *short_gpus when
  * stop is given and reached, for the wait notice. -1 if no one should run. */
@@ -333,27 +363,32 @@ static int schedule(const struct Job *stop, int *short_cpus, int *short_gpus)
 {
     int free_cpus = max_slots - busy_slots, free_gpus = max_gpus - busy_gpus;
     int spare_cpus = free_cpus, spare_gpus = free_gpus;
-    int need_cpus = 0, need_gpus = 0, blocked = 0, chosen = -1, sure = 0, soon = 0;
+    int need_cpus = 0, need_gpus = 0, blocked = 0, chosen = -1, soon = 0;
     double now = monotime(), deadline = -1;
-    struct Release *sure_at, *soon_at;
+    struct Release *soon_at;
+    char *back;
     struct Job *p;
     /* Every job uses at least one CPU, so with none free nothing starts. */
     if (!stop && free_cpus <= 0) return -1;
     for (p = firstjob; p; p = p->next)
-        if (p->state == RUNNING && p->estimate) ++soon;
-    sure_at = malloc((size_t)(soon + 1) * sizeof(*sure_at));
+        if (p->state == RUNNING) ++soon;
     soon_at = malloc((size_t)(soon + 1) * sizeof(*soon_at));
-    if (!sure_at || !soon_at) error("Cannot allocate memory in schedule");
+    back = calloc((size_t)(max_slots + 1) * (size_t)(max_gpus + 1), 1);
+    if (!soon_at || !back) error("Cannot allocate memory in schedule");
+    back[0] = 1;
     soon = 0;
     for (p = firstjob; p; p = p->next) {
         double end;
-        if (p->state != RUNNING || !p->estimate) continue;
+        if (p->state != RUNNING) continue;
+        /* Add this job to every set of running jobs found so far. */
+        for (int c = busy_slots - p->num_slots; c >= 0; --c)
+            for (int g = busy_gpus - p->num_gpus; g >= 0; --g)
+                if (back[c * (max_gpus + 1) + g])
+                    back[(c + p->num_slots) * (max_gpus + 1) + g + p->num_gpus] = 1;
+        if (!p->estimate) continue;
         end = p->started_at + (double)p->estimate;
         soon_at[soon++] = (struct Release){end > now ? end : now, p->num_slots, p->num_gpus};
-        if (end > now)
-            sure_at[sure++] = (struct Release){end, p->num_slots, p->num_gpus};
     }
-    qsort(sure_at, (size_t)sure, sizeof(*sure_at), release_order);
     qsort(soon_at, (size_t)soon, sizeof(*soon_at), release_order);
     /* The notice scans up to its job even when no CPU is left, so it also
      * sees the GPUs that earlier jobs reserve. */
@@ -378,17 +413,7 @@ static int schedule(const struct Job *stop, int *short_cpus, int *short_gpus)
         }
         need_cpus += p->num_slots;
         need_gpus += p->num_gpus;
-        /* The waiting jobs first fit either once the jobs still within
-         * their estimates end, or as soon as the overdue ones end. Leave
-         * them enough at whichever of those has less free. */
-        for (int pass = 0; pass < 2; ++pass) {
-            cpus = need_cpus;
-            gpus = need_gpus;
-            if (pass) free_at(soon_at, soon, now, &cpus, &gpus);
-            else free_at(sure_at, sure, now, &cpus, &gpus);
-            if (cpus - need_cpus < spare_cpus) spare_cpus = cpus > need_cpus ? cpus - need_cpus : 0;
-            if (gpus - need_gpus < spare_gpus) spare_gpus = gpus > need_gpus ? gpus - need_gpus : 0;
-        }
+        leave_over(back, need_cpus, need_gpus, &spare_cpus, &spare_gpus);
         if (!blocked) {
             cpus = p->num_slots;
             gpus = p->num_gpus;
@@ -397,8 +422,8 @@ static int schedule(const struct Job *stop, int *short_cpus, int *short_gpus)
         }
         if (!stop && spare_cpus == 0 && deadline < 0) break;
     }
-    free(sure_at);
     free(soon_at);
+    free(back);
     return chosen;
 }
 

@@ -14,7 +14,9 @@ v0.3.0 (backfilling with estimates):
    its estimate counts as ending at any moment, and nothing borrows while
    the first waiting job needs what a job without an estimate holds. Any
    job, with or without an estimate, may also take what the waiting jobs
-   will not need even once the running jobs with estimates have ended.
+   could not use whichever running jobs end first, which delays no one.
+   So a CPU job may now take a free CPU while a job ahead waits for the
+   GPU, if that job gets a CPU back from the GPU job it waits for.
  - A job without an estimate never passes a waiting job on time alone,
    and a job that needs all CPUs still runs alone. With no estimates the
    order is as before.

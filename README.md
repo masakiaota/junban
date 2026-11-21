@@ -185,9 +185,9 @@ If you interrupt `junban run` itself, with Ctrl-C for example, the command it is
 
 ## Good to know
 
-- Jobs start in the order they were submitted, for each of CPUs and GPUs. A waiting job holds on to the CPUs and GPUs it asks for, so a job behind it starts only if it fits in what is left. A CPU job can therefore start while a GPU job ahead of it waits for the GPU. So that CPUs are not left idle while a large job waits, a job behind may also start first in two cases. Either way, the first waiting job starts no later than the estimates of the running jobs say it can.
-  - It has an estimate, and by that estimate it ends before the first waiting job could start. junban works that time out from the estimates of the running jobs. A running job past its estimate is taken to end at any moment, so it makes this harder. If the first waiting job needs what a job without an estimate holds, no job starts first this way.
-  - It fits in the CPUs and GPUs that the waiting jobs will not need even once the running jobs with estimates have ended. Such a job needs no estimate.
+- Jobs start in the order they were submitted, for each of CPUs and GPUs. A waiting job holds on to the CPUs and GPUs it asks for, so a job behind it starts only if it fits in what is left. A CPU job can therefore start while a GPU job ahead of it waits for the GPU. So that CPUs are not left idle while a large job waits, a job behind may also start first in two cases.
+  - It fits in CPUs and GPUs that the waiting jobs could not use, whichever running jobs end first. Such a job needs no estimate and delays no one.
+  - It has an estimate, and by that estimate it ends before the first waiting job could start. junban works that time out from the estimates of the running jobs, and the first waiting job starts no later than they say. A running job past its estimate is taken to end at any moment, so it makes this harder. If the first waiting job needs what a job without an estimate holds, no job starts first this way.
 
   A job without an estimate therefore never passes a waiting job on time alone, and a job that needs all CPUs still never runs alongside another job. This keeps a large job from waiting forever while small jobs keep going ahead of it.
 - `junban run a && b` puts only `a` in the queue. To queue both, write `junban run sh -c 'a && b'`.
