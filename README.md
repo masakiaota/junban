@@ -12,7 +12,13 @@ It runs on macOS and Ubuntu, and is based on [task-spooler](https://viric.name/s
 
 ## Install
 
-You need a C compiler and make.
+With Homebrew on macOS:
+
+```console
+$ brew install masakiaota/tap/junban
+```
+
+Or build from source (requires a C compiler and make):
 
 ```console
 $ make

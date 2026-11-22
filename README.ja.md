@@ -12,7 +12,13 @@ macOS と Ubuntu で動きます。[task-spooler](https://viric.name/soft/ts/) �
 
 ## インストール
 
-Cコンパイラと make が必要です。
+macOS では Homebrew でインストールできます。
+
+```console
+$ brew install masakiaota/tap/junban
+```
+
+ソースからビルドする場合は、Cコンパイラと make が必要です。
 
 ```console
 $ make
