@@ -6,6 +6,21 @@ agent-readable listings and wait notifications, a terminal watch view, and macOS
 idle-sleep prevention. Removed the old command-line interface and obsolete
 packaging, output capture, mail, dependencies, and queue-reordering features.
 
+v0.4.0 (live upgrade):
+ - After junban is upgraded, the running server switches to the new
+   junban the next time any junban command connects. It notices that the
+   junban it was started as (for example /opt/homebrew/bin/junban) has
+   been replaced, saves its state to an unlinked file, and execs the new
+   junban with the listening socket, the lock and every client connection
+   still open. The process ID stays, and running and queued jobs,
+   finished results and job IDs are kept.
+ - The server first asks the new junban, with the internal --live-check,
+   whether it speaks the same protocol and reads the same state layout.
+   If not, the server keeps running the old junban, and junban shutdown
+   is needed as before.
+ - Servers before 0.4.0 cannot switch, so stop one with junban shutdown
+   once after upgrading. No protocol change.
+
 v0.3.1 (completes EASY backfilling):
  - A job with an estimate may also start ahead of waiting jobs if it
    uses only CPUs and GPUs that the first waiting job leaves free once it

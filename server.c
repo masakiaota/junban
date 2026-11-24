@@ -12,6 +12,8 @@
   #include <sys/time.h>
 #endif
 #include <sys/resource.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
 #include <sys/un.h>
 #include <errno.h>
 #include <string.h>
@@ -61,6 +63,12 @@ static struct Client_conn client_cs[MAXCONN];
 static int nconnections;
 static char *path;
 static int max_descriptors;
+static int lock_fd = -1;
+/* The junban the server was started as, and that file when last checked.
+ * When it is replaced, the server execs the new one and keeps its state. */
+static char *self_path;
+static struct stat self_stat;
+static int upgrade_pending;
 
 /* in jobs.c */
 extern int max_jobs;
@@ -129,9 +137,176 @@ static int get_max_descriptors()
     return max;
 }
 
-void server_main(int notify_fd, char *_path, int ls)
+/* Record where this junban was run from, as an absolute path that still
+ * follows symlinks, so a server notices when an upgrade replaces it. */
+void set_self_path(const char *argv0)
+{
+    char cwd[PATH_MAX], *found = NULL;
+    const char *dirs = getenv("PATH");
+    if (strchr(argv0, '/')) {
+        if (argv0[0] == '/') found = strdup(argv0);
+        else if (getcwd(cwd, sizeof(cwd)) && (found = malloc(strlen(cwd) + strlen(argv0) + 2)))
+            sprintf(found, "%s/%s", cwd, argv0);
+    } else if (dirs) {
+        while (!found) {
+            size_t length = strcspn(dirs, ":");
+            char *candidate = malloc(length + strlen(argv0) + 2);
+            if (!candidate) break;
+            sprintf(candidate, "%.*s/%s", (int)length, length ? dirs : ".", argv0);
+            if (access(candidate, X_OK) == 0) {
+                if (candidate[0] == '/') found = candidate;
+                else {
+                    set_self_path(candidate);
+                    free(candidate);
+                    return;
+                }
+            } else free(candidate);
+            if (!dirs[length]) break;
+            dirs += length + 1;
+        }
+    }
+    free(self_path);
+    self_path = found;
+}
+
+static void inherit_fd(int fd, int inherit)
+{
+    int flags = fcntl(fd, F_GETFD);
+    if (flags >= 0)
+        fcntl(fd, F_SETFD, inherit ? flags & ~FD_CLOEXEC : flags | FD_CLOEXEC);
+}
+
+static void inherit_server_fds(int ls, int inherit)
+{
+    inherit_fd(ls, inherit);
+    inherit_fd(lock_fd, inherit);
+    for (int i = 0; i < nconnections; ++i) inherit_fd(client_cs[i].socket, inherit);
+}
+
+/* Has the junban at self_path been replaced since the server last looked?
+ * Each replacement is reported once. */
+static int self_replaced(void)
+{
+    struct stat st;
+    if (!self_path || stat(self_path, &st) < 0) return 0;
+    if (st.st_dev == self_stat.st_dev && st.st_ino == self_stat.st_ino &&
+        st.st_size == self_stat.st_size && st.st_mtime == self_stat.st_mtime)
+        return 0;
+    self_stat = st;
+    return 1;
+}
+
+/* Ask the new junban whether it speaks this protocol and reads this state
+ * layout. Clients stay connected through the exec, so both must match. */
+static int self_compatible(void)
+{
+    char expected[64], got[64];
+    size_t length = 0;
+    int p[2], status;
+    double deadline = monotime() + 2;
+    pid_t pid;
+    snprintf(expected, sizeof(expected), "junban-live %d %d\n",
+             PROTOCOL_VERSION, LIVE_STATE_VERSION);
+    if (pipe(p) < 0) return 0;
+    pid = fork();
+    if (pid < 0) {
+        close(p[0]);
+        close(p[1]);
+        return 0;
+    }
+    if (pid == 0) {
+        dup2(p[1], STDOUT_FILENO);
+        close(p[0]);
+        close(p[1]);
+        execl(self_path, self_path, "--live-check", (char *)NULL);
+        _exit(127);
+    }
+    close(p[1]);
+    while (length < sizeof(got)) {
+        fd_set set;
+        double left = deadline - monotime();
+        struct timeval wait = {0, 0};
+        ssize_t n;
+        if (left <= 0) break;
+        wait.tv_sec = (time_t)left;
+        wait.tv_usec = (suseconds_t)((left - (double)wait.tv_sec) * 1e6);
+        FD_ZERO(&set);
+        FD_SET(p[0], &set);
+        if (select(p[0] + 1, &set, NULL, NULL, &wait) <= 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        n = read(p[0], got + length, sizeof(got) - length);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) break;
+        length += (size_t)n;
+    }
+    close(p[0]);
+    kill(pid, SIGKILL);
+    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+    return length == strlen(expected) && !memcmp(got, expected, length);
+}
+
+/* Hand the queue to the replaced junban: save the state to an unlinked
+ * file, keep the listening socket, the lock and every client connection
+ * open, and exec. The process ID stays, so clients and the lock see the
+ * same server. Returns only if the exec failed; the server then goes on. */
+static void live_upgrade(int ls)
+{
+    char *name, fdtext[16];
+    FILE *f;
+    int fd;
+    if (!(name = malloc(strlen(path) + sizeof(".live.XXXXXX")))) return;
+    sprintf(name, "%s.live.XXXXXX", path);
+    fd = mkstemp(name);
+    if (fd >= 0) unlink(name);
+    free(name);
+    if (fd < 0) return;
+    if (!(f = fdopen(fd, "w+"))) {
+        close(fd);
+        return;
+    }
+    live_put_string(f, "junban-live");
+    {
+        int version = LIVE_STATE_VERSION, protocol = PROTOCOL_VERSION;
+        live_put(f, &version, sizeof(version));
+        live_put(f, &protocol, sizeof(protocol));
+    }
+    live_put(f, &ls, sizeof(ls));
+    live_put(f, &lock_fd, sizeof(lock_fd));
+    live_put_string(f, path);
+    live_put_string(f, self_path);
+    live_put(f, &nconnections, sizeof(nconnections));
+    for (int i = 0; i < nconnections; ++i) {
+        live_put(f, &client_cs[i].socket, sizeof(client_cs[i].socket));
+        live_put(f, &client_cs[i].hasjob, sizeof(client_cs[i].hasjob));
+        live_put(f, &client_cs[i].jobid, sizeof(client_cs[i].jobid));
+        live_put(f, &client_cs[i].notice_pending, sizeof(client_cs[i].notice_pending));
+    }
+    s_save_jobs(f);
+    if (fflush(f) != 0 || ferror(f)) {
+        warning("cannot save the queue for a live upgrade");
+        fclose(f);
+        return;
+    }
+    stop_sleep_prevention();
+    inherit_server_fds(ls, 1);
+    inherit_fd(fd, 1);
+    snprintf(fdtext, sizeof(fdtext), "%d", fd);
+    execl(self_path, self_path, "--live-resume", fdtext, (char *)NULL);
+    warning("live upgrade failed: %s", strerror(errno));
+    inherit_server_fds(ls, 0);
+    fclose(f);
+}
+
+void server_main(int notify_fd, char *_path, int ls, int lockfd)
 {
     process_type = SERVER;
+    lock_fd = lockfd;
+    if (self_path && stat(self_path, &self_stat) < 0) {
+        free(self_path);
+        self_path = NULL;
+    }
     max_descriptors = get_max_descriptors();
 
     /* Arbitrary limit, that will block the enqueuing, but should allow space
@@ -155,6 +330,50 @@ void server_main(int notify_fd, char *_path, int ls)
     server_loop(ls);
 }
 
+/* The new junban after a live upgrade: read the state the old server saved
+ * and carry on with its socket, lock and clients. */
+void server_resume(int fd)
+{
+    FILE *f;
+    char *magic;
+    int version, protocol, ls;
+    process_type = SERVER;
+    if (!(f = fdopen(fd, "r"))) error("cannot read live state");
+    rewind(f);
+    magic = live_get_string(f);
+    live_get(f, &version, sizeof(version));
+    live_get(f, &protocol, sizeof(protocol));
+    if (!magic || strcmp(magic, "junban-live") || version != LIVE_STATE_VERSION ||
+        protocol != PROTOCOL_VERSION)
+        error("cannot read live state of another version");
+    free(magic);
+    live_get(f, &ls, sizeof(ls));
+    live_get(f, &lock_fd, sizeof(lock_fd));
+    path = live_get_string(f);
+    self_path = live_get_string(f);
+    live_get(f, &nconnections, sizeof(nconnections));
+    if (!path || nconnections < 0 || nconnections > MAXCONN)
+        error("cannot read live state");
+    for (int i = 0; i < nconnections; ++i) {
+        live_get(f, &client_cs[i].socket, sizeof(client_cs[i].socket));
+        live_get(f, &client_cs[i].hasjob, sizeof(client_cs[i].hasjob));
+        live_get(f, &client_cs[i].jobid, sizeof(client_cs[i].jobid));
+        live_get(f, &client_cs[i].notice_pending, sizeof(client_cs[i].notice_pending));
+    }
+    s_load_jobs(f);
+    fclose(f);
+    inherit_server_fds(ls, 0);
+    if (self_path && stat(self_path, &self_stat) < 0) {
+        free(self_path);
+        self_path = NULL;
+    }
+    max_descriptors = get_max_descriptors();
+    max_jobs = max_descriptors - 5;
+    install_sigterm_handler();
+    atexit(stop_sleep_prevention);
+    server_loop(ls);
+}
+
 static int get_conn_of_jobid(int jobid)
 {
     int i;
@@ -175,6 +394,11 @@ static void server_loop(int ls)
     while (keep_loop)
     {
         struct timeval interval = {0, 100000};
+        /* Between requests, so no client message is half read. */
+        if (upgrade_pending) {
+            upgrade_pending = 0;
+            live_upgrade(ls);
+        }
         FD_ZERO(&readset);
         maxfd = 0;
         /* Always accept, including at capacity, to reject explicitly. */
@@ -216,6 +440,8 @@ static void server_loop(int ls)
                     client_cs[nconnections].socket = cs;
                     ++nconnections;
                 }
+                /* A new client may be the first run of an upgraded junban. */
+                if (self_replaced() && self_compatible()) upgrade_pending = 1;
             }
         }
         /* Descend because handling a request can remove a connection. */

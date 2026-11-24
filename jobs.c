@@ -699,3 +699,139 @@ void dump_jobs_struct(FILE *out)
     }
 }
 
+
+/* Live upgrade: the queue state, written by the old server and read back by
+ * the new one after exec. Every field is written by name, not as a raw
+ * struct, so a later version can still read it; LIVE_STATE_VERSION changes
+ * whenever the layout does. */
+/* A failed write shows in ferror(f), which the writer checks once at the
+ * end, so the old server keeps running if it cannot save. */
+void live_put(FILE *f, const void *data, size_t size)
+{
+    if (size) fwrite(data, size, 1, f);
+}
+
+void live_get(FILE *f, void *data, size_t size)
+{
+    if (size && fread(data, size, 1, f) != 1) error("cannot read live state");
+}
+
+void live_put_string(FILE *f, const char *s)
+{
+    int size = s ? (int)strlen(s) + 1 : 0;
+    live_put(f, &size, sizeof(size));
+    live_put(f, s, (size_t)size);
+}
+
+char *live_get_string(FILE *f)
+{
+    int size;
+    char *s;
+    live_get(f, &size, sizeof(size));
+    if (size <= 0) return NULL;
+    if (!(s = malloc((size_t)size))) error("cannot allocate live state");
+    live_get(f, s, (size_t)size);
+    s[size - 1] = '\0';
+    return s;
+}
+
+static void put_job(FILE *f, const struct Job *p)
+{
+    int state = p->state;
+    live_put(f, &p->jobid, sizeof(p->jobid));
+    live_put_string(f, p->command);
+    live_put(f, &state, sizeof(state));
+    live_put(f, &p->result, sizeof(p->result));
+    live_put(f, &p->should_keep_finished, sizeof(p->should_keep_finished));
+    live_put(f, &p->pid, sizeof(p->pid));
+    live_put_string(f, p->label);
+    live_put_string(f, p->tag);
+    live_put_string(f, p->log);
+    live_put(f, &p->num_slots, sizeof(p->num_slots));
+    live_put(f, &p->num_gpus, sizeof(p->num_gpus));
+    live_put(f, &p->cpus_unspecified, sizeof(p->cpus_unspecified));
+    live_put(f, &p->kill_requested, sizeof(p->kill_requested));
+    live_put(f, &p->client_lost, sizeof(p->client_lost));
+    live_put(f, &p->estimate, sizeof(p->estimate));
+    live_put(f, &p->queued_at, sizeof(p->queued_at));
+    live_put(f, &p->started_at, sizeof(p->started_at));
+    live_put(f, &p->finished_at, sizeof(p->finished_at));
+    live_put(f, &p->finished_wall, sizeof(p->finished_wall));
+    live_put(f, &p->finish_pending, sizeof(p->finish_pending));
+    live_put(f, &p->stop_kill_sent, sizeof(p->stop_kill_sent));
+    live_put(f, &p->stop_deadline, sizeof(p->stop_deadline));
+}
+
+static struct Job *get_job(FILE *f)
+{
+    struct Job *p = calloc(1, sizeof(*p));
+    int state;
+    if (!p) error("cannot allocate live state");
+    live_get(f, &p->jobid, sizeof(p->jobid));
+    p->command = live_get_string(f);
+    live_get(f, &state, sizeof(state));
+    p->state = (enum Jobstate)state;
+    live_get(f, &p->result, sizeof(p->result));
+    live_get(f, &p->should_keep_finished, sizeof(p->should_keep_finished));
+    live_get(f, &p->pid, sizeof(p->pid));
+    p->label = live_get_string(f);
+    p->tag = live_get_string(f);
+    p->log = live_get_string(f);
+    live_get(f, &p->num_slots, sizeof(p->num_slots));
+    live_get(f, &p->num_gpus, sizeof(p->num_gpus));
+    live_get(f, &p->cpus_unspecified, sizeof(p->cpus_unspecified));
+    live_get(f, &p->kill_requested, sizeof(p->kill_requested));
+    live_get(f, &p->client_lost, sizeof(p->client_lost));
+    live_get(f, &p->estimate, sizeof(p->estimate));
+    live_get(f, &p->queued_at, sizeof(p->queued_at));
+    live_get(f, &p->started_at, sizeof(p->started_at));
+    live_get(f, &p->finished_at, sizeof(p->finished_at));
+    live_get(f, &p->finished_wall, sizeof(p->finished_wall));
+    live_get(f, &p->finish_pending, sizeof(p->finish_pending));
+    live_get(f, &p->stop_kill_sent, sizeof(p->stop_kill_sent));
+    live_get(f, &p->stop_deadline, sizeof(p->stop_deadline));
+    return p;
+}
+
+static void put_list(FILE *f, const struct Job *p)
+{
+    int count = 0;
+    const struct Job *q;
+    for (q = p; q; q = q->next) ++count;
+    live_put(f, &count, sizeof(count));
+    for (; p; p = p->next) put_job(f, p);
+}
+
+static struct Job *get_list(FILE *f)
+{
+    struct Job *first = NULL, **next = &first;
+    int count;
+    live_get(f, &count, sizeof(count));
+    while (count-- > 0) {
+        *next = get_job(f);
+        next = &(*next)->next;
+    }
+    return first;
+}
+
+void s_save_jobs(FILE *f)
+{
+    live_put(f, &jobids, sizeof(jobids));
+    live_put(f, &busy_slots, sizeof(busy_slots));
+    live_put(f, &busy_gpus, sizeof(busy_gpus));
+    live_put(f, &max_slots, sizeof(max_slots));
+    live_put(f, &max_gpus, sizeof(max_gpus));
+    put_list(f, firstjob);
+    put_list(f, first_finished_job);
+}
+
+void s_load_jobs(FILE *f)
+{
+    live_get(f, &jobids, sizeof(jobids));
+    live_get(f, &busy_slots, sizeof(busy_slots));
+    live_get(f, &busy_gpus, sizeof(busy_gpus));
+    live_get(f, &max_slots, sizeof(max_slots));
+    live_get(f, &max_gpus, sizeof(max_gpus));
+    firstjob = get_list(f);
+    first_finished_job = get_list(f);
+}
