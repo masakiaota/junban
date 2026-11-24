@@ -473,6 +473,29 @@ class QueueTests(unittest.TestCase):
             self.assertEqual(e.wait(timeout=3), 0)
 
 
+    def test_backfill_uses_what_the_first_waiting_job_leaves_free(self):
+        with Queue(4) as q:
+            a = q.start("a", 3, estimate="1h")
+            q.pids("a")
+            # b can start when a ends; four CPUs are free then and b needs
+            # three, so one CPU and the GPU are left over.
+            b = q.start("b", 3)
+            q.wait_rows(2)
+            # n has no estimate, so it waits its turn.
+            n = q.start("n", 1)
+            q.wait_rows(3)
+            # x outlasts a, but it uses only what b leaves free.
+            x = q.start("x", 1, gpus=1, estimate="2h")
+            q.pids("x")
+            time.sleep(0.15)
+            self.assertFalse((q.path / "n.pids").exists())
+            q.release("a")
+            self.assertEqual(a.wait(timeout=3), 0)
+            for name, p in (("b", b), ("x", x), ("n", n)):
+                q.pids(name)
+                q.release(name)
+                self.assertEqual(p.wait(timeout=3), 0)
+
     def test_backfill_needs_estimates_of_the_running_jobs(self):
         with Queue(4) as q:
             a = q.start("a", 2)
@@ -941,7 +964,7 @@ class VisibilityOnlyTests(unittest.TestCase):
                            "ls     0 if it listed a job, 1 if it listed none"):
                 self.assertIn(phrase, text)
             self.assertLessEqual(max(map(len, text.splitlines())), 100)
-            self.assertEqual(q.call("version")[1], b"junban 0.3.0 (based on task-spooler 1.0.4)\n")
+            self.assertEqual(q.call("version")[1], b"junban 0.3.1 (based on task-spooler 1.0.4)\n")
             self.assertEqual(q.call("ls", "--summary"), (0, b"cpus 0/4 gpus 0/1 running 0 queued 0\n", b""))
             for args in (["--summary", "-a"], ["-a", "-a"], ["--summary", "--summary"]):
                 self.own_failure(q.call("ls", *args))
