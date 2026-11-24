@@ -496,6 +496,25 @@ class QueueTests(unittest.TestCase):
                 q.release(name)
                 self.assertEqual(p.wait(timeout=3), 0)
 
+    def test_backfill_counts_jobs_ending_together(self):
+        with Queue(4) as q:
+            a1 = q.start("a1", 1, estimate="1s")
+            q.pids("a1")
+            a2 = q.start("a2", 1, estimate="1s")
+            q.pids("a2")
+            time.sleep(1.3)
+            # a1 and a2 are overdue, so both count as ending now: four CPUs
+            # are free then, b needs three, and one is left over for x.
+            b = q.start("b", 3)
+            q.wait_rows(3)
+            x = q.start("x", 1, estimate="1h")
+            q.pids("x")
+            for name, p in (("a1", a1), ("a2", a2), ("b", b), ("x", x)):
+                if name == "b":
+                    q.pids("b")
+                q.release(name)
+                self.assertEqual(p.wait(timeout=3), 0)
+
     def test_backfill_needs_estimates_of_the_running_jobs(self):
         with Queue(4) as q:
             a = q.start("a", 2)

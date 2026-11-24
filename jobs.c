@@ -309,6 +309,11 @@ static double start_time(const struct Job *job, double now, int *extra_cpus, int
         cpus += ends[i].cpus;
         gpus += ends[i].gpus;
     }
+    /* Jobs that end at the same time free their CPUs and GPUs together. */
+    for (; i < n && ends[i].at == at; ++i) {
+        cpus += ends[i].cpus;
+        gpus += ends[i].gpus;
+    }
     free(ends);
     if (cpus < job->num_slots || gpus < job->num_gpus) {
         *extra_cpus = *extra_gpus = 0;
