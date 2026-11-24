@@ -68,7 +68,7 @@ static int lock_fd = -1;
  * When it is replaced, the server copies the new one to staged, checks
  * that copy, and execs it, keeping its state. */
 static char *self_path;
-static long long self_id[5];
+static long long self_id[5], staged_id[5];
 static char *staged;
 
 /* Identify a file well enough to notice when it is replaced or rewritten:
@@ -205,11 +205,12 @@ static void inherit_server_fds(int ls, int inherit)
     for (int i = 0; i < nconnections; ++i) inherit_fd(client_cs[i].socket, inherit);
 }
 
-/* If the junban at self_path has been replaced since the server last
- * looked, copy it to a private file beside the socket and return that
- * file's name, or NULL. The server checks and execs this copy, so it runs
- * the very image it checked even if the installed one changes again.
- * Each replacement is staged once. */
+/* If the junban at self_path differs from the one the server knows, copy
+ * it to a private file beside the socket and return that file's name, or
+ * NULL. The server checks and execs this copy, so it runs the very image
+ * it checked even if the installed one changes again. staged_id gets the
+ * installed file's identity; the server takes it on only once it knows
+ * the outcome, so any failure before that is tried again. */
 static char *stage_self(void)
 {
     char *name, buffer[65536];
@@ -242,8 +243,7 @@ static char *stage_self(void)
         free(name);
         return NULL;
     }
-    /* Only now is this replacement handled; a failed copy is tried again. */
-    memcpy(self_id, id, sizeof(id));
+    memcpy(staged_id, id, sizeof(id));
     return name;
 }
 
@@ -257,7 +257,8 @@ static void drop_staged(void)
 
 /* Ask the staged junban whether it speaks this protocol and reads this
  * state layout. Clients stay connected through the exec, so both must
- * match. */
+ * match. 1 if it does, 0 if it does not or does not answer in time, -1 if
+ * the question could not be asked. */
 static int staged_compatible(void)
 {
     char expected[64], got[64];
@@ -267,12 +268,12 @@ static int staged_compatible(void)
     pid_t pid;
     snprintf(expected, sizeof(expected), "junban-live %d %d\n",
              PROTOCOL_VERSION, LIVE_STATE_VERSION);
-    if (pipe(p) < 0) return 0;
+    if (pipe(p) < 0) return -1;
     pid = fork();
     if (pid < 0) {
         close(p[0]);
         close(p[1]);
-        return 0;
+        return -1;
     }
     if (pid == 0) {
         dup2(p[1], STDOUT_FILENO);
@@ -337,7 +338,8 @@ static void live_upgrade(int ls)
     live_put_string(f, path);
     live_put_string(f, self_path);
     live_put_string(f, staged);
-    live_put(f, self_id, sizeof(self_id));
+    /* The new server knows the installed file it was copied from. */
+    live_put(f, staged_id, sizeof(staged_id));
     live_put(f, &nconnections, sizeof(nconnections));
     for (int i = 0; i < nconnections; ++i) {
         live_put(f, &client_cs[i].socket, sizeof(client_cs[i].socket));
@@ -465,10 +467,8 @@ static void server_loop(int ls)
         /* Between requests, so no client message is half read. */
         if (staged) {
             live_upgrade(ls);
-            /* Still here, so the switch failed. Forget the installed file,
-             * so the next client stages and tries it again. */
+            /* Still here, so the switch failed; the next client retries. */
             drop_staged();
-            memset(self_id, 0, sizeof(self_id));
             prevent_sleep(s_has_jobs());
         }
         FD_ZERO(&readset);
@@ -513,8 +513,12 @@ static void server_loop(int ls)
                     ++nconnections;
                 }
                 /* A new client may be the first run of an upgraded junban. */
-                if (!staged && (staged = stage_self()) && !staged_compatible())
-                    drop_staged();
+                if (!staged && (staged = stage_self())) {
+                    int compatible = staged_compatible();
+                    /* Ask about an incompatible junban only once. */
+                    if (compatible == 0) memcpy(self_id, staged_id, sizeof(self_id));
+                    if (compatible != 1) drop_staged();
+                }
             }
         }
         /* Descend because handling a request can remove a connection. */
