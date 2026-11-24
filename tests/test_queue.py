@@ -570,6 +570,9 @@ class QueueTests(unittest.TestCase):
         shutil.copy2(BIN, q.bin)
         return bindir
 
+    def assert_no_upgrade_files(self, q):
+        self.assertEqual(sorted(q.path.glob("s.bin.*")) + sorted(q.path.glob("s.live.*")), [])
+
     def test_live_upgrade_keeps_the_queue(self):
         with Queue(4) as q:
             bindir = self.installed_copy(q)
@@ -597,6 +600,24 @@ class QueueTests(unittest.TestCase):
             self.assertEqual(b.wait(timeout=3), 0)
             self.assertEqual(q.call("run", "true"), (0, b"", b""))
             self.assertIn(b" id=3 ", q.call("ls", "-a")[1])
+            self.assert_no_upgrade_files(q)
+
+    def test_live_upgrade_through_an_empty_path_entry(self):
+        with Queue(4) as q:
+            # An empty PATH entry means the current directory.
+            shutil.copy2(BIN, q.path / "junban")
+            q.env["PATH"] = ":" + os.environ["PATH"]
+            q.bin = "junban"
+            a = q.start("a", 1)
+            q.pids("a")
+            new = q.path / "junban.new"
+            shutil.copy2(BIN, new)
+            os.replace(new, q.path / "junban")
+            q.call("ls")
+            eventually(lambda: "--live-resume" in self.server_args(q))
+            q.release("a")
+            self.assertEqual(a.wait(timeout=3), 0)
+            self.assert_no_upgrade_files(q)
 
     def test_live_upgrade_needs_a_compatible_junban(self):
         with Queue(4) as q:
@@ -616,6 +637,7 @@ class QueueTests(unittest.TestCase):
             q.release("a")
             self.assertEqual(a.wait(timeout=3), 0)
             self.assertEqual(q.call("run", "true"), (0, b"", b""))
+            self.assert_no_upgrade_files(q)
 
     def test_parallel_slots(self):
         with Queue() as q:

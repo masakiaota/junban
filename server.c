@@ -65,10 +65,11 @@ static char *path;
 static int max_descriptors;
 static int lock_fd = -1;
 /* The junban the server was started as, and that file when last checked.
- * When it is replaced, the server execs the new one and keeps its state. */
+ * When it is replaced, the server copies the new one to staged, checks
+ * that copy, and execs it, keeping its state. */
 static char *self_path;
 static struct stat self_stat;
-static int upgrade_pending;
+static char *staged;
 
 /* in jobs.c */
 extern int max_jobs;
@@ -150,9 +151,12 @@ void set_self_path(const char *argv0)
     } else if (dirs) {
         while (!found) {
             size_t length = strcspn(dirs, ":");
-            char *candidate = malloc(length + strlen(argv0) + 2);
+            /* An empty PATH entry is the current directory. */
+            const char *dir = length ? dirs : ".";
+            int dir_length = length ? (int)length : 1;
+            char *candidate = malloc((size_t)dir_length + strlen(argv0) + 2);
             if (!candidate) break;
-            sprintf(candidate, "%.*s/%s", (int)length, length ? dirs : ".", argv0);
+            sprintf(candidate, "%.*s/%s", dir_length, dir, argv0);
             if (access(candidate, X_OK) == 0) {
                 if (candidate[0] == '/') found = candidate;
                 else {
@@ -183,22 +187,58 @@ static void inherit_server_fds(int ls, int inherit)
     for (int i = 0; i < nconnections; ++i) inherit_fd(client_cs[i].socket, inherit);
 }
 
-/* Has the junban at self_path been replaced since the server last looked?
- * Each replacement is reported once. */
-static int self_replaced(void)
+/* If the junban at self_path has been replaced since the server last
+ * looked, copy it to a private file beside the socket and return that
+ * file's name, or NULL. The server checks and execs this copy, so it runs
+ * the very image it checked even if the installed one changes again.
+ * Each replacement is staged once. */
+static char *stage_self(void)
 {
+    char *name, buffer[65536];
     struct stat st;
-    if (!self_path || stat(self_path, &st) < 0) return 0;
-    if (st.st_dev == self_stat.st_dev && st.st_ino == self_stat.st_ino &&
-        st.st_size == self_stat.st_size && st.st_mtime == self_stat.st_mtime)
-        return 0;
+    ssize_t n = 0;
+    int in, out, ok;
+    if (!self_path || (in = open(self_path, O_RDONLY | O_CLOEXEC)) < 0) return NULL;
+    if (fstat(in, &st) < 0 ||
+        (st.st_dev == self_stat.st_dev && st.st_ino == self_stat.st_ino &&
+         st.st_size == self_stat.st_size && st.st_mtime == self_stat.st_mtime) ||
+        !(name = malloc(strlen(path) + sizeof(".bin.XXXXXX")))) {
+        close(in);
+        return NULL;
+    }
     self_stat = st;
-    return 1;
+    sprintf(name, "%s.bin.XXXXXX", path);
+    if ((out = mkstemp(name)) < 0) {
+        close(in);
+        free(name);
+        return NULL;
+    }
+    ok = fchmod(out, 0700) == 0;
+    while (ok && (n = read(in, buffer, sizeof(buffer))) > 0)
+        ok = write(out, buffer, (size_t)n) == n;
+    ok = ok && n == 0;
+    close(in);
+    if (close(out) < 0) ok = 0;
+    if (!ok) {
+        unlink(name);
+        free(name);
+        return NULL;
+    }
+    return name;
 }
 
-/* Ask the new junban whether it speaks this protocol and reads this state
- * layout. Clients stay connected through the exec, so both must match. */
-static int self_compatible(void)
+static void drop_staged(void)
+{
+    if (!staged) return;
+    unlink(staged);
+    free(staged);
+    staged = NULL;
+}
+
+/* Ask the staged junban whether it speaks this protocol and reads this
+ * state layout. Clients stay connected through the exec, so both must
+ * match. */
+static int staged_compatible(void)
 {
     char expected[64], got[64];
     size_t length = 0;
@@ -218,7 +258,7 @@ static int self_compatible(void)
         dup2(p[1], STDOUT_FILENO);
         close(p[0]);
         close(p[1]);
-        execl(self_path, self_path, "--live-check", (char *)NULL);
+        execl(staged, staged, "--live-check", (char *)NULL);
         _exit(127);
     }
     close(p[1]);
@@ -247,10 +287,10 @@ static int self_compatible(void)
     return length == strlen(expected) && !memcmp(got, expected, length);
 }
 
-/* Hand the queue to the replaced junban: save the state to an unlinked
+/* Hand the queue to the staged junban: save the state to an unlinked
  * file, keep the listening socket, the lock and every client connection
  * open, and exec. The process ID stays, so clients and the lock see the
- * same server. Returns only if the exec failed; the server then goes on. */
+ * same server. Returns only if that failed; the server then goes on. */
 static void live_upgrade(int ls)
 {
     char *name, fdtext[16];
@@ -276,6 +316,12 @@ static void live_upgrade(int ls)
     live_put(f, &lock_fd, sizeof(lock_fd));
     live_put_string(f, path);
     live_put_string(f, self_path);
+    live_put_string(f, staged);
+    {
+        long long id[4] = {(long long)self_stat.st_dev, (long long)self_stat.st_ino,
+                           (long long)self_stat.st_size, (long long)self_stat.st_mtime};
+        live_put(f, id, sizeof(id));
+    }
     live_put(f, &nconnections, sizeof(nconnections));
     for (int i = 0; i < nconnections; ++i) {
         live_put(f, &client_cs[i].socket, sizeof(client_cs[i].socket));
@@ -293,7 +339,7 @@ static void live_upgrade(int ls)
     inherit_server_fds(ls, 1);
     inherit_fd(fd, 1);
     snprintf(fdtext, sizeof(fdtext), "%d", fd);
-    execl(self_path, self_path, "--live-resume", fdtext, (char *)NULL);
+    execl(staged, staged, "--live-resume", fdtext, (char *)NULL);
     warning("live upgrade failed: %s", strerror(errno));
     inherit_server_fds(ls, 0);
     fclose(f);
@@ -351,6 +397,15 @@ void server_resume(int fd)
     live_get(f, &lock_fd, sizeof(lock_fd));
     path = live_get_string(f);
     self_path = live_get_string(f);
+    staged = live_get_string(f);
+    {
+        long long id[4];
+        live_get(f, id, sizeof(id));
+        self_stat.st_dev = (dev_t)id[0];
+        self_stat.st_ino = (ino_t)id[1];
+        self_stat.st_size = (off_t)id[2];
+        self_stat.st_mtime = (time_t)id[3];
+    }
     live_get(f, &nconnections, sizeof(nconnections));
     if (!path || nconnections < 0 || nconnections > MAXCONN)
         error("cannot read live state");
@@ -363,14 +418,14 @@ void server_resume(int fd)
     s_load_jobs(f);
     fclose(f);
     inherit_server_fds(ls, 0);
-    if (self_path && stat(self_path, &self_stat) < 0) {
-        free(self_path);
-        self_path = NULL;
-    }
+    /* This process runs from the staged copy; the installed file stays. */
+    drop_staged();
     max_descriptors = get_max_descriptors();
     max_jobs = max_descriptors - 5;
     install_sigterm_handler();
     atexit(stop_sleep_prevention);
+    /* The old server stopped sleep prevention just before the exec. */
+    prevent_sleep(s_has_jobs());
     server_loop(ls);
 }
 
@@ -395,9 +450,10 @@ static void server_loop(int ls)
     {
         struct timeval interval = {0, 100000};
         /* Between requests, so no client message is half read. */
-        if (upgrade_pending) {
-            upgrade_pending = 0;
+        if (staged) {
             live_upgrade(ls);
+            drop_staged();
+            prevent_sleep(s_has_jobs());
         }
         FD_ZERO(&readset);
         maxfd = 0;
@@ -441,7 +497,8 @@ static void server_loop(int ls)
                     ++nconnections;
                 }
                 /* A new client may be the first run of an upgraded junban. */
-                if (self_replaced() && self_compatible()) upgrade_pending = 1;
+                if (!staged && (staged = stage_self()) && !staged_compatible())
+                    drop_staged();
             }
         }
         /* Descend because handling a request can remove a connection. */
