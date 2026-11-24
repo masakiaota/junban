@@ -619,6 +619,61 @@ class QueueTests(unittest.TestCase):
             self.assertEqual(a.wait(timeout=3), 0)
             self.assert_no_upgrade_files(q)
 
+    def test_live_upgrade_skips_a_directory_in_path(self):
+        with Queue(4) as q:
+            # A directory named junban earlier in PATH is not what runs.
+            (q.path / "d1" / "junban").mkdir(parents=True)
+            (q.path / "d2").mkdir()
+            shutil.copy2(BIN, q.path / "d2" / "junban")
+            q.env["PATH"] = os.pathsep.join([str(q.path / "d1"), str(q.path / "d2"),
+                                             os.environ["PATH"]])
+            q.bin = "junban"
+            a = q.start("a", 1)
+            q.pids("a")
+            new = q.path / "d2" / "junban.new"
+            shutil.copy2(BIN, new)
+            os.replace(new, q.path / "d2" / "junban")
+            q.call("ls")
+            eventually(lambda: "--live-resume" in self.server_args(q))
+            q.release("a")
+            self.assertEqual(a.wait(timeout=3), 0)
+
+    def test_live_upgrade_notices_a_rewrite_within_a_second(self):
+        with Queue(4) as q:
+            self.installed_copy(q)
+            whole = (int(time.time()) - 10) * 10**9
+            os.utime(q.bin, ns=(whole, whole))
+            a = q.start("a", 1)
+            q.pids("a")
+            # Same file, same size, same second: only the nanoseconds differ.
+            os.utime(q.bin, ns=(whole, whole + 500))
+            q.call("ls")
+            eventually(lambda: "--live-resume" in self.server_args(q))
+            q.release("a")
+            self.assertEqual(a.wait(timeout=3), 0)
+
+    def test_live_upgrade_retries_after_a_failed_copy(self):
+        with Queue(4) as q:
+            bindir = self.installed_copy(q)
+            a = q.start("a", 1)
+            q.pids("a")
+            new = bindir / "junban.new"
+            shutil.copy2(BIN, new)
+            os.replace(new, q.bin)
+            # The copy goes beside the socket; make that fail once.
+            q.path.chmod(0o500)
+            try:
+                q.call("ls")
+                time.sleep(0.3)
+                self.assertNotIn("--live-resume", self.server_args(q))
+            finally:
+                q.path.chmod(0o700)
+            q.call("ls")
+            eventually(lambda: "--live-resume" in self.server_args(q))
+            q.release("a")
+            self.assertEqual(a.wait(timeout=3), 0)
+            self.assert_no_upgrade_files(q)
+
     def test_live_upgrade_needs_a_compatible_junban(self):
         with Queue(4) as q:
             bindir = self.installed_copy(q)

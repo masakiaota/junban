@@ -68,8 +68,23 @@ static int lock_fd = -1;
  * When it is replaced, the server copies the new one to staged, checks
  * that copy, and execs it, keeping its state. */
 static char *self_path;
-static struct stat self_stat;
+static long long self_id[5];
 static char *staged;
+
+/* Identify a file well enough to notice when it is replaced or rewritten:
+ * device, inode, size, and modification time to the nanosecond. */
+static void file_id(const struct stat *st, long long id[5])
+{
+    id[0] = (long long)st->st_dev;
+    id[1] = (long long)st->st_ino;
+    id[2] = (long long)st->st_size;
+    id[3] = (long long)st->st_mtime;
+#ifdef __APPLE__
+    id[4] = (long long)st->st_mtimensec;
+#else
+    id[4] = (long long)st->st_mtim.tv_nsec;
+#endif
+}
 
 /* in jobs.c */
 extern int max_jobs;
@@ -157,7 +172,10 @@ void set_self_path(const char *argv0)
             char *candidate = malloc((size_t)dir_length + strlen(argv0) + 2);
             if (!candidate) break;
             sprintf(candidate, "%.*s/%s", dir_length, dir, argv0);
-            if (access(candidate, X_OK) == 0) {
+            struct stat st;
+            /* Like the shell, take only an executable regular file. */
+            if (access(candidate, X_OK) == 0 && stat(candidate, &st) == 0 &&
+                S_ISREG(st.st_mode)) {
                 if (candidate[0] == '/') found = candidate;
                 else {
                     set_self_path(candidate);
@@ -196,17 +214,17 @@ static char *stage_self(void)
 {
     char *name, buffer[65536];
     struct stat st;
+    long long id[5];
     ssize_t n = 0;
     int in, out, ok;
     if (!self_path || (in = open(self_path, O_RDONLY | O_CLOEXEC)) < 0) return NULL;
-    if (fstat(in, &st) < 0 ||
-        (st.st_dev == self_stat.st_dev && st.st_ino == self_stat.st_ino &&
-         st.st_size == self_stat.st_size && st.st_mtime == self_stat.st_mtime) ||
+    if (fstat(in, &st) == 0) file_id(&st, id);
+    else memcpy(id, self_id, sizeof(id));
+    if (!memcmp(id, self_id, sizeof(id)) ||
         !(name = malloc(strlen(path) + sizeof(".bin.XXXXXX")))) {
         close(in);
         return NULL;
     }
-    self_stat = st;
     sprintf(name, "%s.bin.XXXXXX", path);
     if ((out = mkstemp(name)) < 0) {
         close(in);
@@ -224,6 +242,8 @@ static char *stage_self(void)
         free(name);
         return NULL;
     }
+    /* Only now is this replacement handled; a failed copy is tried again. */
+    memcpy(self_id, id, sizeof(id));
     return name;
 }
 
@@ -317,11 +337,7 @@ static void live_upgrade(int ls)
     live_put_string(f, path);
     live_put_string(f, self_path);
     live_put_string(f, staged);
-    {
-        long long id[4] = {(long long)self_stat.st_dev, (long long)self_stat.st_ino,
-                           (long long)self_stat.st_size, (long long)self_stat.st_mtime};
-        live_put(f, id, sizeof(id));
-    }
+    live_put(f, self_id, sizeof(self_id));
     live_put(f, &nconnections, sizeof(nconnections));
     for (int i = 0; i < nconnections; ++i) {
         live_put(f, &client_cs[i].socket, sizeof(client_cs[i].socket));
@@ -349,9 +365,13 @@ void server_main(int notify_fd, char *_path, int ls, int lockfd)
 {
     process_type = SERVER;
     lock_fd = lockfd;
-    if (self_path && stat(self_path, &self_stat) < 0) {
-        free(self_path);
-        self_path = NULL;
+    if (self_path) {
+        struct stat st;
+        if (stat(self_path, &st) == 0) file_id(&st, self_id);
+        else {
+            free(self_path);
+            self_path = NULL;
+        }
     }
     max_descriptors = get_max_descriptors();
 
@@ -398,14 +418,7 @@ void server_resume(int fd)
     path = live_get_string(f);
     self_path = live_get_string(f);
     staged = live_get_string(f);
-    {
-        long long id[4];
-        live_get(f, id, sizeof(id));
-        self_stat.st_dev = (dev_t)id[0];
-        self_stat.st_ino = (ino_t)id[1];
-        self_stat.st_size = (off_t)id[2];
-        self_stat.st_mtime = (time_t)id[3];
-    }
+    live_get(f, self_id, sizeof(self_id));
     live_get(f, &nconnections, sizeof(nconnections));
     if (!path || nconnections < 0 || nconnections > MAXCONN)
         error("cannot read live state");
