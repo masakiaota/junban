@@ -101,7 +101,8 @@ int main(int argc, char **argv)
         puts("                       the other: a GPU job that needs little CPU gives both, as -c 1 -g 1.");
         puts("      --estimate DUR   Expected duration: 90s, 30m, 2h, 1d. Shown to others. Never a timeout.");
         puts("                       Lets the job start early in idle CPUs if it ends before the first");
-        puts("                       waiting job could start. Do not give less than you expect.");
+        puts("                       waiting job could start, or uses only what that job leaves free.");
+        puts("                       Do not give less than you expect.");
         puts("      --tag TAG        Label the job as yours. Default: $JUNBAN_TAG.");
         puts("                       1-63 characters of A-Z a-z 0-9 . _ : @ + -");
         puts("      --detach         Queue the job, print only its ID on stdout, and return at once.");
@@ -151,7 +152,7 @@ int main(int argc, char **argv)
     }
     if (!strcmp(argv[1], "version") || !strcmp(argv[1], "--version")) {
         if (argc != 2) usage();
-        puts("junban 0.3.0 (based on task-spooler 1.0.4)");
+        puts("junban 0.3.1 (based on task-spooler 1.0.4)");
         return 0;
     }
     if (!strcmp(argv[1], "run")) {

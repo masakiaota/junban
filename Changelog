@@ -6,6 +6,16 @@ agent-readable listings and wait notifications, a terminal watch view, and macOS
 idle-sleep prevention. Removed the old command-line interface and obsolete
 packaging, output capture, mail, dependencies, and queue-reordering features.
 
+v0.3.1 (completes EASY backfilling):
+ - A job with an estimate may also start ahead of waiting jobs if it
+   uses only CPUs and GPUs that the first waiting job leaves free once it
+   can start, by the estimates of the running jobs. Such a job may run
+   past that time without delaying the first waiting job. 0.3.0 had only
+   the other half of EASY backfilling, so a two-CPU GPU job waited behind
+   a 14-CPU job even though the GPU and two CPUs would stay free.
+ - Jobs without an estimate still wait their turn.
+ - No protocol change.
+
 v0.3.0 (backfilling with estimates):
  - A job with an estimate may start ahead of waiting jobs in the free
    CPUs and GPUs if, by its estimate, it ends before the first waiting
