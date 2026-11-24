@@ -465,7 +465,10 @@ static void server_loop(int ls)
         /* Between requests, so no client message is half read. */
         if (staged) {
             live_upgrade(ls);
+            /* Still here, so the switch failed. Forget the installed file,
+             * so the next client stages and tries it again. */
             drop_staged();
+            memset(self_id, 0, sizeof(self_id));
             prevent_sleep(s_has_jobs());
         }
         FD_ZERO(&readset);
