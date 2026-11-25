@@ -12,6 +12,8 @@
   #include <sys/time.h>
 #endif
 #include <sys/resource.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
 #include <sys/un.h>
 #include <errno.h>
 #include <string.h>
@@ -61,6 +63,28 @@ static struct Client_conn client_cs[MAXCONN];
 static int nconnections;
 static char *path;
 static int max_descriptors;
+static int lock_fd = -1;
+/* The junban the server was started as, and that file when last checked.
+ * When it is replaced, the server copies the new one to staged, checks
+ * that copy, and execs it, keeping its state. */
+static char *self_path;
+static long long self_id[5], staged_id[5];
+static char *staged;
+
+/* Identify a file well enough to notice when it is replaced or rewritten:
+ * device, inode, size, and modification time to the nanosecond. */
+static void file_id(const struct stat *st, long long id[5])
+{
+    id[0] = (long long)st->st_dev;
+    id[1] = (long long)st->st_ino;
+    id[2] = (long long)st->st_size;
+    id[3] = (long long)st->st_mtime;
+#ifdef __APPLE__
+    id[4] = (long long)st->st_mtimensec;
+#else
+    id[4] = (long long)st->st_mtim.tv_nsec;
+#endif
+}
 
 /* in jobs.c */
 extern int max_jobs;
@@ -129,9 +153,228 @@ static int get_max_descriptors()
     return max;
 }
 
-void server_main(int notify_fd, char *_path, int ls)
+/* Record where this junban was run from, as an absolute path that still
+ * follows symlinks, so a server notices when an upgrade replaces it. */
+void set_self_path(const char *argv0)
+{
+    char cwd[PATH_MAX], *found = NULL;
+    const char *dirs = getenv("PATH");
+    if (strchr(argv0, '/')) {
+        if (argv0[0] == '/') found = strdup(argv0);
+        else if (getcwd(cwd, sizeof(cwd)) && (found = malloc(strlen(cwd) + strlen(argv0) + 2)))
+            sprintf(found, "%s/%s", cwd, argv0);
+    } else if (dirs) {
+        while (!found) {
+            size_t length = strcspn(dirs, ":");
+            /* An empty PATH entry is the current directory. */
+            const char *dir = length ? dirs : ".";
+            int dir_length = length ? (int)length : 1;
+            char *candidate = malloc((size_t)dir_length + strlen(argv0) + 2);
+            if (!candidate) break;
+            sprintf(candidate, "%.*s/%s", dir_length, dir, argv0);
+            struct stat st;
+            /* Like the shell, take only an executable regular file. */
+            if (access(candidate, X_OK) == 0 && stat(candidate, &st) == 0 &&
+                S_ISREG(st.st_mode)) {
+                if (candidate[0] == '/') found = candidate;
+                else {
+                    set_self_path(candidate);
+                    free(candidate);
+                    return;
+                }
+            } else free(candidate);
+            if (!dirs[length]) break;
+            dirs += length + 1;
+        }
+    }
+    free(self_path);
+    self_path = found;
+}
+
+static void inherit_fd(int fd, int inherit)
+{
+    int flags = fcntl(fd, F_GETFD);
+    if (flags >= 0)
+        fcntl(fd, F_SETFD, inherit ? flags & ~FD_CLOEXEC : flags | FD_CLOEXEC);
+}
+
+static void inherit_server_fds(int ls, int inherit)
+{
+    inherit_fd(ls, inherit);
+    inherit_fd(lock_fd, inherit);
+    for (int i = 0; i < nconnections; ++i) inherit_fd(client_cs[i].socket, inherit);
+}
+
+/* If the junban at self_path differs from the one the server knows, copy
+ * it to a private file beside the socket and return that file's name, or
+ * NULL. The server checks and execs this copy, so it runs the very image
+ * it checked even if the installed one changes again. staged_id gets the
+ * installed file's identity; the server takes it on only once it knows
+ * the outcome, so any failure before that is tried again. */
+static char *stage_self(void)
+{
+    char *name, buffer[65536];
+    struct stat st;
+    long long id[5];
+    ssize_t n = 0;
+    int in, out, ok;
+    if (!self_path || (in = open(self_path, O_RDONLY | O_CLOEXEC)) < 0) return NULL;
+    if (fstat(in, &st) == 0) file_id(&st, id);
+    else memcpy(id, self_id, sizeof(id));
+    if (!memcmp(id, self_id, sizeof(id)) ||
+        !(name = malloc(strlen(path) + sizeof(".bin.XXXXXX")))) {
+        close(in);
+        return NULL;
+    }
+    sprintf(name, "%s.bin.XXXXXX", path);
+    if ((out = mkstemp(name)) < 0) {
+        close(in);
+        free(name);
+        return NULL;
+    }
+    ok = fchmod(out, 0700) == 0;
+    while (ok && (n = read(in, buffer, sizeof(buffer))) > 0)
+        ok = write(out, buffer, (size_t)n) == n;
+    ok = ok && n == 0;
+    close(in);
+    if (close(out) < 0) ok = 0;
+    if (!ok) {
+        unlink(name);
+        free(name);
+        return NULL;
+    }
+    memcpy(staged_id, id, sizeof(id));
+    return name;
+}
+
+static void drop_staged(void)
+{
+    if (!staged) return;
+    unlink(staged);
+    free(staged);
+    staged = NULL;
+}
+
+/* Ask the staged junban whether it speaks this protocol and reads this
+ * state layout. Clients stay connected through the exec, so both must
+ * match. 1 if it does, 0 if it does not or does not answer in time, -1 if
+ * the question could not be asked. */
+static int staged_compatible(void)
+{
+    char expected[64], got[64];
+    size_t length = 0;
+    int p[2], status;
+    double deadline = monotime() + 2;
+    pid_t pid;
+    snprintf(expected, sizeof(expected), "junban-live %d %d\n",
+             PROTOCOL_VERSION, LIVE_STATE_VERSION);
+    if (pipe(p) < 0) return -1;
+    pid = fork();
+    if (pid < 0) {
+        close(p[0]);
+        close(p[1]);
+        return -1;
+    }
+    if (pid == 0) {
+        dup2(p[1], STDOUT_FILENO);
+        close(p[0]);
+        close(p[1]);
+        execl(staged, staged, "--live-check", (char *)NULL);
+        _exit(127);
+    }
+    close(p[1]);
+    while (length < sizeof(got)) {
+        fd_set set;
+        double left = deadline - monotime();
+        struct timeval wait = {0, 0};
+        ssize_t n;
+        if (left <= 0) break;
+        wait.tv_sec = (time_t)left;
+        wait.tv_usec = (suseconds_t)((left - (double)wait.tv_sec) * 1e6);
+        FD_ZERO(&set);
+        FD_SET(p[0], &set);
+        if (select(p[0] + 1, &set, NULL, NULL, &wait) <= 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        n = read(p[0], got + length, sizeof(got) - length);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) break;
+        length += (size_t)n;
+    }
+    close(p[0]);
+    kill(pid, SIGKILL);
+    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+    return length == strlen(expected) && !memcmp(got, expected, length);
+}
+
+/* Hand the queue to the staged junban: save the state to an unlinked
+ * file, keep the listening socket, the lock and every client connection
+ * open, and exec. The process ID stays, so clients and the lock see the
+ * same server. Returns only if that failed; the server then goes on. */
+static void live_upgrade(int ls)
+{
+    char *name, fdtext[16];
+    FILE *f;
+    int fd;
+    if (!(name = malloc(strlen(path) + sizeof(".live.XXXXXX")))) return;
+    sprintf(name, "%s.live.XXXXXX", path);
+    fd = mkstemp(name);
+    if (fd >= 0) unlink(name);
+    free(name);
+    if (fd < 0) return;
+    if (!(f = fdopen(fd, "w+"))) {
+        close(fd);
+        return;
+    }
+    live_put_string(f, "junban-live");
+    {
+        int version = LIVE_STATE_VERSION, protocol = PROTOCOL_VERSION;
+        live_put(f, &version, sizeof(version));
+        live_put(f, &protocol, sizeof(protocol));
+    }
+    live_put(f, &ls, sizeof(ls));
+    live_put(f, &lock_fd, sizeof(lock_fd));
+    live_put_string(f, path);
+    live_put_string(f, self_path);
+    live_put_string(f, staged);
+    /* The new server knows the installed file it was copied from. */
+    live_put(f, staged_id, sizeof(staged_id));
+    live_put(f, &nconnections, sizeof(nconnections));
+    for (int i = 0; i < nconnections; ++i) {
+        live_put(f, &client_cs[i].socket, sizeof(client_cs[i].socket));
+        live_put(f, &client_cs[i].hasjob, sizeof(client_cs[i].hasjob));
+        live_put(f, &client_cs[i].jobid, sizeof(client_cs[i].jobid));
+        live_put(f, &client_cs[i].notice_pending, sizeof(client_cs[i].notice_pending));
+    }
+    s_save_jobs(f);
+    if (fflush(f) != 0 || ferror(f)) {
+        warning("cannot save the queue for a live upgrade");
+        fclose(f);
+        return;
+    }
+    stop_sleep_prevention();
+    inherit_server_fds(ls, 1);
+    inherit_fd(fd, 1);
+    snprintf(fdtext, sizeof(fdtext), "%d", fd);
+    execl(staged, staged, "--live-resume", fdtext, (char *)NULL);
+    warning("live upgrade failed: %s", strerror(errno));
+    inherit_server_fds(ls, 0);
+    fclose(f);
+}
+
+void server_main(int notify_fd, char *_path, int ls, int lockfd)
 {
     process_type = SERVER;
+    lock_fd = lockfd;
+    if (self_path) {
+        struct stat st;
+        if (stat(self_path, &st) == 0) file_id(&st, self_id);
+        else {
+            free(self_path);
+            self_path = NULL;
+        }
+    }
     max_descriptors = get_max_descriptors();
 
     /* Arbitrary limit, that will block the enqueuing, but should allow space
@@ -155,6 +398,52 @@ void server_main(int notify_fd, char *_path, int ls)
     server_loop(ls);
 }
 
+/* The new junban after a live upgrade: read the state the old server saved
+ * and carry on with its socket, lock and clients. */
+void server_resume(int fd)
+{
+    FILE *f;
+    char *magic;
+    int version, protocol, ls;
+    process_type = SERVER;
+    if (!(f = fdopen(fd, "r"))) error("cannot read live state");
+    rewind(f);
+    magic = live_get_string(f);
+    live_get(f, &version, sizeof(version));
+    live_get(f, &protocol, sizeof(protocol));
+    if (!magic || strcmp(magic, "junban-live") || version != LIVE_STATE_VERSION ||
+        protocol != PROTOCOL_VERSION)
+        error("cannot read live state of another version");
+    free(magic);
+    live_get(f, &ls, sizeof(ls));
+    live_get(f, &lock_fd, sizeof(lock_fd));
+    path = live_get_string(f);
+    self_path = live_get_string(f);
+    staged = live_get_string(f);
+    live_get(f, self_id, sizeof(self_id));
+    live_get(f, &nconnections, sizeof(nconnections));
+    if (!path || nconnections < 0 || nconnections > MAXCONN)
+        error("cannot read live state");
+    for (int i = 0; i < nconnections; ++i) {
+        live_get(f, &client_cs[i].socket, sizeof(client_cs[i].socket));
+        live_get(f, &client_cs[i].hasjob, sizeof(client_cs[i].hasjob));
+        live_get(f, &client_cs[i].jobid, sizeof(client_cs[i].jobid));
+        live_get(f, &client_cs[i].notice_pending, sizeof(client_cs[i].notice_pending));
+    }
+    s_load_jobs(f);
+    fclose(f);
+    inherit_server_fds(ls, 0);
+    /* This process runs from the staged copy; the installed file stays. */
+    drop_staged();
+    max_descriptors = get_max_descriptors();
+    max_jobs = max_descriptors - 5;
+    install_sigterm_handler();
+    atexit(stop_sleep_prevention);
+    /* The old server stopped sleep prevention just before the exec. */
+    prevent_sleep(s_has_jobs());
+    server_loop(ls);
+}
+
 static int get_conn_of_jobid(int jobid)
 {
     int i;
@@ -175,6 +464,13 @@ static void server_loop(int ls)
     while (keep_loop)
     {
         struct timeval interval = {0, 100000};
+        /* Between requests, so no client message is half read. */
+        if (staged) {
+            live_upgrade(ls);
+            /* Still here, so the switch failed; the next client retries. */
+            drop_staged();
+            prevent_sleep(s_has_jobs());
+        }
         FD_ZERO(&readset);
         maxfd = 0;
         /* Always accept, including at capacity, to reject explicitly. */
@@ -215,6 +511,13 @@ static void server_loop(int ls)
                     fcntl(cs, F_SETFD, FD_CLOEXEC);
                     client_cs[nconnections].socket = cs;
                     ++nconnections;
+                }
+                /* A new client may be the first run of an upgraded junban. */
+                if (!staged && (staged = stage_self())) {
+                    int compatible = staged_compatible();
+                    /* Ask about an incompatible junban only once. */
+                    if (compatible == 0) memcpy(self_id, staged_id, sizeof(self_id));
+                    if (compatible != 1) drop_staged();
                 }
             }
         }

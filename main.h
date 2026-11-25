@@ -7,7 +7,9 @@
 */
 enum
 {
-    PROTOCOL_VERSION=736
+    PROTOCOL_VERSION=736,
+    /* Layout of the state a live upgrade hands to the new server. */
+    LIVE_STATE_VERSION=1
 };
 
 /* Retired message numbers and fields are reserved to preserve the 40-byte
@@ -259,9 +261,17 @@ void s_send_runjob(int s, int jobid);
 void s_set_max_slots(int new_max_slots);
 void s_get_max_slots(int s);
 void dump_jobs_struct(FILE *out);
+void live_put(FILE *f, const void *data, size_t size);
+void live_get(FILE *f, void *data, size_t size);
+void live_put_string(FILE *f, const char *s);
+char *live_get_string(FILE *f);
+void s_save_jobs(FILE *f);
+void s_load_jobs(FILE *f);
 
 /* server.c */
-void server_main(int notify_fd, char *_path, int ls);
+void server_main(int notify_fd, char *_path, int ls, int lockfd);
+void server_resume(int fd);
+void set_self_path(const char *argv0);
 void dump_conns_struct(FILE *out);
 
 /* server_start.c */

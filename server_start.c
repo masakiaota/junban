@@ -199,7 +199,7 @@ int ensure_server_up()
                 signal(SIGHUP, SIG_IGN);
                 if (ftruncate(lockfd, 0) == 0)
                     dprintf(lockfd, "%ld\n", (long)getpid());
-                server_main(p[1], socket_path, ls);
+                server_main(p[1], socket_path, ls, lockfd);
                 _exit(0); /* closes the lifetime lock */
             }
             close(p[1]);

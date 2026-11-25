@@ -91,6 +91,17 @@ int main(int argc, char **argv)
     int i = 2, status = 0, fd = -1;
     process_type = CLIENT;
     if (argc < 2) usage();
+    /* Internal: a server asks a replaced junban whether it can take over
+     * (--live-check), then execs it to do so (--live-resume FD). */
+    if (argc == 2 && !strcmp(argv[1], "--live-check")) {
+        printf("junban-live %d %d\n", PROTOCOL_VERSION, LIVE_STATE_VERSION);
+        return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "--live-resume")) {
+        server_resume(number(argv[2], 0));
+        return 0;
+    }
+    set_self_path(argv[0]);
     if (!strcmp(argv[1], "help") || !strcmp(argv[1], "--help")) {
         if (argc != 2) usage();
         puts("Usage:");
@@ -152,7 +163,7 @@ int main(int argc, char **argv)
     }
     if (!strcmp(argv[1], "version") || !strcmp(argv[1], "--version")) {
         if (argc != 2) usage();
-        puts("junban 0.3.1 (based on task-spooler 1.0.4)");
+        puts("junban 0.4.0 (based on task-spooler 1.0.4)");
         return 0;
     }
     if (!strcmp(argv[1], "run")) {

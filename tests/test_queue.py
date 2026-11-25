@@ -97,6 +97,7 @@ def servers():
 class Queue:
     def __init__(self, slots=4):
         self.path = Path(tempfile.mkdtemp(prefix="q-", dir=ROOT))
+        self.bin = BIN
         self.env = dict(os.environ, JUNBAN_SOCKET="s", JUNBAN_SLOTS=str(slots))
         self.clients = []
         self.groups = set()
@@ -105,7 +106,7 @@ class Queue:
 
     def popen(self, *args, **kw):
         env = kw.pop("env", self.env)
-        p = subprocess.Popen([BIN, *map(str, args)], cwd=kw.pop("cwd", self.path),
+        p = subprocess.Popen([self.bin, *map(str, args)], cwd=kw.pop("cwd", self.path),
                              env=env, stdin=kw.pop("stdin", subprocess.DEVNULL),
                              stdout=kw.pop("stdout", subprocess.PIPE),
                              stderr=kw.pop("stderr", subprocess.PIPE), **kw)
@@ -556,6 +557,143 @@ class QueueTests(unittest.TestCase):
                 self.assertEqual(p.wait(timeout=3), 0)
 
 
+    def server_args(self, q):
+        return subprocess.run(["ps", "-p", str(q.server()), "-o", "args="],
+                              capture_output=True, text=True).stdout
+
+    def installed_copy(self, q):
+        # Run the queue from a copy, so the test can replace it as an
+        # upgrade replaces an installed junban.
+        bindir = q.path / "bin"
+        bindir.mkdir()
+        q.bin = str(bindir / "junban")
+        shutil.copy2(BIN, q.bin)
+        return bindir
+
+    def assert_no_upgrade_files(self, q):
+        self.assertEqual(sorted(q.path.glob("s.bin.*")) + sorted(q.path.glob("s.live.*")), [])
+
+    def test_live_upgrade_keeps_the_queue(self):
+        with Queue(4) as q:
+            bindir = self.installed_copy(q)
+            self.assertEqual(q.call("run", "true"), (0, b"", b""))
+            a = q.start("a", 1, estimate="1h")
+            q.pids("a")
+            b = q.start("b")
+            self.assertEqual(q.wait_rows(2), [(1, "running"), (2, "queued")])
+            server = q.server()
+            self.assertNotIn("--live-resume", self.server_args(q))
+            new = bindir / "junban.new"
+            shutil.copy2(BIN, new)
+            os.replace(new, q.bin)
+            # The next client lets the server notice and switch.
+            q.call("ls")
+            eventually(lambda: "--live-resume" in self.server_args(q))
+            self.assertEqual(q.server(), server)
+            self.assertEqual(q.rows(), [(1, "running"), (2, "queued")])
+            self.assertEqual(q.call("wait", "0"), (0, b"", b""))
+            # Clients that were connected across the switch carry on.
+            q.release("a")
+            self.assertEqual(a.wait(timeout=3), 0)
+            q.pids("b")
+            q.release("b")
+            self.assertEqual(b.wait(timeout=3), 0)
+            self.assertEqual(q.call("run", "true"), (0, b"", b""))
+            self.assertIn(b" id=3 ", q.call("ls", "-a")[1])
+            self.assert_no_upgrade_files(q)
+
+    def test_live_upgrade_through_an_empty_path_entry(self):
+        with Queue(4) as q:
+            # An empty PATH entry means the current directory.
+            shutil.copy2(BIN, q.path / "junban")
+            q.env["PATH"] = ":" + os.environ["PATH"]
+            q.bin = "junban"
+            a = q.start("a", 1)
+            q.pids("a")
+            new = q.path / "junban.new"
+            shutil.copy2(BIN, new)
+            os.replace(new, q.path / "junban")
+            q.call("ls")
+            eventually(lambda: "--live-resume" in self.server_args(q))
+            q.release("a")
+            self.assertEqual(a.wait(timeout=3), 0)
+            self.assert_no_upgrade_files(q)
+
+    def test_live_upgrade_skips_a_directory_in_path(self):
+        with Queue(4) as q:
+            # A directory named junban earlier in PATH is not what runs.
+            (q.path / "d1" / "junban").mkdir(parents=True)
+            (q.path / "d2").mkdir()
+            shutil.copy2(BIN, q.path / "d2" / "junban")
+            q.env["PATH"] = os.pathsep.join([str(q.path / "d1"), str(q.path / "d2"),
+                                             os.environ["PATH"]])
+            q.bin = "junban"
+            a = q.start("a", 1)
+            q.pids("a")
+            new = q.path / "d2" / "junban.new"
+            shutil.copy2(BIN, new)
+            os.replace(new, q.path / "d2" / "junban")
+            q.call("ls")
+            eventually(lambda: "--live-resume" in self.server_args(q))
+            q.release("a")
+            self.assertEqual(a.wait(timeout=3), 0)
+
+    def test_live_upgrade_notices_a_rewrite_within_a_second(self):
+        with Queue(4) as q:
+            self.installed_copy(q)
+            whole = (int(time.time()) - 10) * 10**9
+            os.utime(q.bin, ns=(whole, whole))
+            a = q.start("a", 1)
+            q.pids("a")
+            # Same file, same size, same second: only the nanoseconds differ.
+            os.utime(q.bin, ns=(whole, whole + 500))
+            q.call("ls")
+            eventually(lambda: "--live-resume" in self.server_args(q))
+            q.release("a")
+            self.assertEqual(a.wait(timeout=3), 0)
+
+    def test_live_upgrade_retries_after_a_failed_copy(self):
+        with Queue(4) as q:
+            bindir = self.installed_copy(q)
+            a = q.start("a", 1)
+            q.pids("a")
+            new = bindir / "junban.new"
+            shutil.copy2(BIN, new)
+            os.replace(new, q.bin)
+            # The copy goes beside the socket; make that fail once.
+            q.path.chmod(0o500)
+            try:
+                q.call("ls")
+                time.sleep(0.3)
+                self.assertNotIn("--live-resume", self.server_args(q))
+            finally:
+                q.path.chmod(0o700)
+            q.call("ls")
+            eventually(lambda: "--live-resume" in self.server_args(q))
+            q.release("a")
+            self.assertEqual(a.wait(timeout=3), 0)
+            self.assert_no_upgrade_files(q)
+
+    def test_live_upgrade_needs_a_compatible_junban(self):
+        with Queue(4) as q:
+            bindir = self.installed_copy(q)
+            a = q.start("a", 1)
+            q.pids("a")
+            # A junban that speaks another protocol cannot take over the
+            # connected clients, so the server keeps running as it is.
+            new = bindir / "junban.new"
+            new.write_text("#!/bin/sh\necho 'junban-live 0 0'\n")
+            new.chmod(0o755)
+            os.replace(new, q.bin)
+            q.bin = BIN
+            self.assertEqual(q.rows(), [(0, "running")])
+            time.sleep(0.3)
+            self.assertNotIn("--live-resume", self.server_args(q))
+            q.release("a")
+            self.assertEqual(a.wait(timeout=3), 0)
+            self.assertEqual(q.call("run", "true"), (0, b"", b""))
+            self.assert_no_upgrade_files(q)
+
     def test_parallel_slots(self):
         with Queue() as q:
             a, b = q.start("a", 3), q.start("b", 1)
@@ -983,7 +1121,7 @@ class VisibilityOnlyTests(unittest.TestCase):
                            "ls     0 if it listed a job, 1 if it listed none"):
                 self.assertIn(phrase, text)
             self.assertLessEqual(max(map(len, text.splitlines())), 100)
-            self.assertEqual(q.call("version")[1], b"junban 0.3.1 (based on task-spooler 1.0.4)\n")
+            self.assertEqual(q.call("version")[1], b"junban 0.4.0 (based on task-spooler 1.0.4)\n")
             self.assertEqual(q.call("ls", "--summary"), (0, b"cpus 0/4 gpus 0/1 running 0 queued 0\n", b""))
             for args in (["--summary", "-a"], ["-a", "-a"], ["--summary", "--summary"]):
                 self.own_failure(q.call("ls", *args))

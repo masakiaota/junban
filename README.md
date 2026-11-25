@@ -27,6 +27,12 @@ $ make install PREFIX=$HOME/.local
 
 This installs `$HOME/.local/bin/junban`. Without `PREFIX`, it installs under `/usr/local`.
 
+### Upgrade
+
+Upgrade junban the way you installed it, with `brew upgrade junban` or `make install` again. The running server notices the new junban the next time any junban command connects to it, and switches to it in place. Running and queued jobs, finished results and job IDs are kept, and waiting commands stay connected.
+
+If the new junban speaks a different protocol, the server keeps running the old one. Stop it with `junban shutdown` when no jobs are running or queued. A server older than 0.4.0 cannot switch either, so after upgrading from one, run `junban shutdown` once at such a time.
+
 ## Usage
 
 ### Run a job
