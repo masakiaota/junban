@@ -186,8 +186,9 @@ struct Job
     int stop_kill_sent;
     double stop_deadline;
     /* Scheduling, kept only in the server: how much of its slack the jobs
-     * started ahead of it have used, when the plan starts it (INFINITY if
-     * not yet), and how much later it would with a job started ahead. */
+     * started ahead of it have used. The other two are scratch for one look
+     * at the jobs: when the plan starts it (INFINITY if it cannot yet), and
+     * how much later it would start with a job started ahead. */
     double delayed, planned, late;
 };
 

@@ -234,8 +234,7 @@ int s_newjob(int s, struct msg *m)
     p->client_lost = 0;
     p->finish_pending = p->stop_kill_sent = 0;
     p->stop_deadline = 0;
-    p->delayed = p->late = 0;
-    p->planned = INFINITY;
+    p->delayed = 0;
     p->num_slots = p->cpus_unspecified ? max_slots : m->u.newjob.num_slots;
     p->num_gpus = m->u.newjob.num_gpus;
     p->pid = 0;
@@ -295,6 +294,9 @@ disconnected:
  * early or late moves the plan too, but that uses up no one's slack. */
 
 #define SLACK_SHARE 0.2
+
+/* When next_run_job last looked at the jobs. */
+static double looked_at;
 
 /* What is free from at until the next step, and after the last one for good. */
 struct Step {
@@ -429,7 +431,7 @@ int next_run_job(void)
     int free_cpus = max_slots - busy_slots, free_gpus = max_gpus - busy_gpus;
     int held_cpus = 0, held_gpus = 0; /* By running jobs of unknown length. */
     int most_cpus = 0, most_gpus = 0; /* The most a waiting job so far asks for. */
-    double now = monotime();
+    double now = looked_at = monotime();
     struct Plan pl = {0};
     struct Job *p, **fits, *chosen = NULL;
     int n = 0, i;
@@ -457,8 +459,10 @@ int next_run_job(void)
         if (p->num_gpus > most_gpus) most_gpus = p->num_gpus;
     }
     qsort(fits, (size_t)n, sizeof(*fits), fuller_first);
-    plan_running(&pl, now);
-    plan_waiting(&pl, NULL);
+    if (n) {
+        plan_running(&pl, now);
+        plan_waiting(&pl, NULL);
+    }
     for (i = 0; i < n && !chosen; ++i) {
         plan_running(&pl, now);
         plan_take(&pl, now, length(fits[i]), fits[i]->num_slots, fits[i]->num_gpus);
@@ -670,16 +674,18 @@ void s_end_job(const struct Result *result, int jobid)
 
 /* Seconds until the server should look at the jobs again unasked: shortly
  * while a stopped job's processes are going away, else when a running job
- * reaches its expected end, which moves the plan. -1 if never. */
+ * reaches the end expected of it at the last look, which moves the plan.
+ * -1 if never. */
 double s_next_wake(void)
 {
     struct Job *job;
     double now = monotime(), wake = -1;
     for (job = firstjob; job; job = job->next) {
+        double left;
         if (job->finish_pending || job->stop_deadline) return 0.1;
-        if (job->state == RUNNING && job->estimate &&
-            (wake < 0 || expected_end(job, now) - now < wake))
-            wake = expected_end(job, now) - now;
+        if (job->state != RUNNING || !job->estimate) continue;
+        left = expected_end(job, looked_at) - now;
+        if (wake < 0 || left < wake) wake = left > 0 ? left : 0;
     }
     /* select() refuses a very long wait, and waking early costs nothing. */
     return wake > 3600 ? 3600 : wake;
