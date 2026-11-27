@@ -29,6 +29,8 @@ static int jobids = 0;
 int max_jobs;
 
 static void shortage(const struct Job *job, int *short_cpus, int *short_gpus);
+static void plan_now(void);
+static void view_start_by(const struct Job *job, struct Job_view *view);
 
 
 static void send_list_line(int s, const char * str)
@@ -115,11 +117,13 @@ int s_has_jobs(void)
     return firstjob != NULL;
 }
 
-static void send_view(int socket, const struct Job *job)
+/* With planned, after plan_now(), the view tells when a waiting job starts. */
+static void send_view(int socket, const struct Job *job, int planned)
 {
     struct msg message = {0};
     struct Job_view view;
     job_view(job, &view);
+    if (planned) view_start_by(job, &view);
     message.type = SNAPSHOT_ROW;
     message.u.max_slots = max_slots;
     send_msg(socket, &message);
@@ -132,14 +136,15 @@ void s_snapshot(int socket, int all)
     struct msg end = {0};
     int count = 0, limit = all ? 20 : 5;
     for (p = firstjob; p; p = p->next)
-        if (p->state == RUNNING) send_view(socket, p);
+        if (p->state == RUNNING) send_view(socket, p, 0);
+    plan_now();
     for (p = firstjob; p; p = p->next)
-        if (p->state == QUEUED) send_view(socket, p);
+        if (p->state == QUEUED) send_view(socket, p, 1);
     /* Listings show only the newest 20 of the kept results. */
     for (p = first_finished_job; p; p = p->next)
         finished[count++ % 20] = p;
     for (int i = count - 1; i >= 0 && i >= count - 20 && limit; --i, --limit)
-        send_view(socket, finished[i % 20]);
+        send_view(socket, finished[i % 20], 0);
     end.type = SNAPSHOT_END;
     end.u.snapshot_end.max_slots = max_slots;
     end.u.snapshot_end.next_jobid = jobids;
@@ -158,6 +163,8 @@ void s_wait_notice(int socket, int jobid)
     for (p = firstjob; p && p != job; p = p->next) ++ahead;
     shortage(job, &short_cpus, &short_gpus);
     job_view(job, &queued);
+    plan_now();
+    view_start_by(job, &queued);
     view_cpus(&queued, cpus, sizeof(cpus));
     snprintf(line, sizeof(line), "id=%d queued, cpus=%s, gpus=%d, %d ahead, waiting for %s\n",
              jobid, cpus, queued.gpus, ahead,
@@ -173,7 +180,10 @@ void s_wait_notice(int socket, int jobid)
                  p->jobid, view.label, cpus, view.gpus, timing);
         send_list_line(socket, line);
     }
+    /* The client shows the time, in its own time zone. */
     end.type = NOTICE_END;
+    end.u.start_by.low = (unsigned int)queued.start_by;
+    end.u.start_by.high = (unsigned int)(queued.start_by >> 32);
     send_msg(socket, &end);
 }
 
@@ -460,6 +470,29 @@ static int plan_waiting(struct Plan *pl, const struct Job *ahead)
     return 1;
 }
 
+/* Plan the waiting jobs as things stand, for view_start_by(). */
+static void plan_now(void)
+{
+    struct Plan pl = {0};
+    plan_running(&pl, monotime(), NULL);
+    plan_waiting(&pl, NULL);
+    free(pl.step);
+}
+
+/* Note in the view the latest a waiting job starts by the plan just made:
+ * its planned start plus the slack it has left, as wall-clock seconds. It
+ * stays 0 if the job has no planned start, or one decades away, as an
+ * absurd estimate gives. */
+static void view_start_by(const struct Job *job, struct Job_view *view)
+{
+    double left = job->planned + slack(job) - job->delayed - monotime();
+    struct timespec wall;
+    if (!(left < 1e9)) return;
+    clock_gettime(CLOCK_REALTIME, &wall);
+    /* Round the wall-clock time once, so the minute shown stays put. */
+    view->start_by = (long long)((double)wall.tv_sec + wall.tv_nsec / 1e9 + left + 0.5);
+}
+
 /* The job to start now, or -1: the first in the line that fits and may
  * start. The first waiting job costs no one anything, so it may. */
 int next_run_job(void)
@@ -527,7 +560,7 @@ void s_job_info(int socket, int jobid)
     p = findjob(jobid);
     if (!p)
         for (p = first_finished_job; p && p->jobid != jobid; p = p->next) {}
-    if (p) send_view(socket, p);
+    if (p) send_view(socket, p, 0);
     else {
         struct msg unknown = {0};
         unknown.type = NEWJOB_NOK;

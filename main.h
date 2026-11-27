@@ -7,7 +7,7 @@
 */
 enum
 {
-    PROTOCOL_VERSION=736,
+    PROTOCOL_VERSION=737,
     /* Layout of the state a live upgrade hands to the new server. */
     LIVE_STATE_VERSION=1
 };
@@ -159,6 +159,11 @@ struct msg
             int max_gpus;
         } snapshot_end;
         int version;
+        /* NOTICE_END: Job_view's start_by, in halves so that the frame
+         * keeps its size. */
+        struct {
+            unsigned int low, high;
+        } start_by;
     } u;
 };
 
@@ -199,6 +204,7 @@ struct Job_view {
     double elapsed, waited;
     unsigned long long estimate;
     long long ended; /* Wall-clock end, in seconds since the epoch; 0 if none. */
+    long long start_by; /* The latest a queued job starts, likewise; 0 if unknown. */
     char label[128];
     char tag[64];
     char log[512];
@@ -214,6 +220,7 @@ struct Snapshot {
 
 double monotime(void);
 void format_duration(char *dst, size_t size, unsigned long long seconds);
+void format_clock(char *dst, size_t size, long long when, const char *between);
 void job_view(const struct Job *job, struct Job_view *view);
 void fit_columns(char *dst, size_t size, const char *src, int columns, int pad);
 int text_columns(const char *src);

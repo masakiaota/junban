@@ -171,6 +171,23 @@ void job_view(const struct Job *job, struct Job_view *view)
     safe_text(view->command, sizeof(view->command), job->command, 0);
 }
 
+/* The clock time when, with the date before it unless it is today. */
+void format_clock(char *dst, size_t size, long long when, const char *between)
+{
+    time_t t = (time_t)when, now = time(NULL);
+    struct tm then, today;
+    char date[16] = "";
+    if (!localtime_r(&t, &then) || !localtime_r(&now, &today)) {
+        snprintf(dst, size, "?");
+        return;
+    }
+    if (then.tm_year != today.tm_year || then.tm_yday != today.tm_yday) {
+        strftime(date, sizeof(date), "%m-%d", &then);
+        snprintf(date + strlen(date), sizeof(date) - strlen(date), "%s", between);
+    }
+    snprintf(dst, size, "%s%02d:%02d", date, then.tm_hour, then.tm_min);
+}
+
 void view_cpus(const struct Job_view *view, char *dst, size_t size)
 {
     if (view->unspecified) snprintf(dst, size, "all(%d)", view->cpus);
@@ -179,7 +196,8 @@ void view_cpus(const struct Job_view *view, char *dst, size_t size)
 
 void view_fields(const struct Job_view *view, char *dst, size_t size)
 {
-    char elapsed[48], estimate[48];
+    char elapsed[48], estimate[48], by[32];
+    size_t used;
     format_duration(elapsed, sizeof(elapsed), (unsigned long long)
                     (view->state == QUEUED ? view->waited : view->elapsed));
     if (view->estimate) {
@@ -189,6 +207,11 @@ void view_fields(const struct Job_view *view, char *dst, size_t size)
                  view->state != QUEUED && view->elapsed > (double)view->estimate ? " over" : "");
     } else snprintf(dst, size, "%s=%s",
                     view->state == QUEUED ? "waited" : "elapsed", elapsed);
+    used = strlen(dst);
+    if (view->start_by && used < size) {
+        format_clock(by, sizeof(by), view->start_by, "T");
+        snprintf(dst + used, size - used, " start-by=%s", by);
+    }
 }
 
 void view_status(const struct Job_view *view, char *dst, size_t size)
