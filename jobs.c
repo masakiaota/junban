@@ -307,6 +307,7 @@ struct Step {
 struct Plan {
     struct Step *step;
     int n, cap;
+    int held_cpus, held_gpus; /* By the jobs of unknown length that run. */
 };
 
 static double slack(const struct Job *job)
@@ -363,15 +364,29 @@ static void plan_take(struct Plan *pl, double start, double run, int cpus, int g
     }
 }
 
-/* What is free from now on, as the running jobs of known length end. */
-static void plan_running(struct Plan *pl, double now)
+/* A job that runs gives back what it holds at its end, if that is known. */
+static void plan_run(struct Plan *pl, const struct Job *job, double end)
+{
+    if (end < INFINITY) plan_take(pl, end, INFINITY, -job->num_slots, -job->num_gpus);
+    else {
+        pl->held_cpus += job->num_slots;
+        pl->held_gpus += job->num_gpus;
+    }
+}
+
+/* What is free from now on, as the running jobs end, with the waiting job
+ * starting, if any, started now. */
+static void plan_running(struct Plan *pl, double now, const struct Job *starting)
 {
     const struct Job *p;
-    pl->n = 0;
+    pl->n = pl->held_cpus = pl->held_gpus = 0;
     plan_insert(pl, 0, (struct Step){now, max_slots - busy_slots, max_gpus - busy_gpus});
     for (p = firstjob; p; p = p->next)
-        if (p->state == RUNNING && p->estimate)
-            plan_take(pl, expected_end(p, now), INFINITY, -p->num_slots, -p->num_gpus);
+        if (p->state == RUNNING) plan_run(pl, p, expected_end(p, now));
+    if (starting) {
+        plan_take(pl, now, INFINITY, starting->num_slots, starting->num_gpus);
+        plan_run(pl, starting, now + length(starting));
+    }
 }
 
 /* The earliest time job fits for its whole length; INFINITY if never. */
@@ -389,14 +404,24 @@ static double plan_fit(const struct Plan *pl, const struct Job *job)
 
 /* Place the waiting jobs in queue order. With no job started ahead, note
  * each planned start. With one, note how much later each job then starts,
- * and return 0 once that is more than the job's slack has left. */
+ * and return 0 once that is more than the job's slack has left.
+ *
+ * A job of unknown length may hold what it takes for good. So it is placed
+ * only if the jobs of unknown length that run, and it, still leave each job
+ * ahead of it what that job asks for, of whatever it uses itself. */
 static int plan_waiting(struct Plan *pl, const struct Job *ahead)
 {
+    int most_cpus = 0, most_gpus = 0; /* The most a job so far asks for. */
     struct Job *p;
     for (p = firstjob; p; p = p->next) {
-        double start;
+        double start = INFINITY;
         if (p->state != QUEUED || p == ahead) continue;
-        start = plan_fit(pl, p);
+        if (p->estimate ||
+            (pl->held_cpus + p->num_slots + most_cpus <= max_slots &&
+             (!p->num_gpus || pl->held_gpus + p->num_gpus + most_gpus <= max_gpus)))
+            start = plan_fit(pl, p);
+        if (p->num_slots > most_cpus) most_cpus = p->num_slots;
+        if (p->num_gpus > most_gpus) most_gpus = p->num_gpus;
         if (!ahead) p->planned = start;
         else {
             /* A job with no planned start has none to lose. */
@@ -429,43 +454,28 @@ static int fuller_first(const void *a, const void *b)
 int next_run_job(void)
 {
     int free_cpus = max_slots - busy_slots, free_gpus = max_gpus - busy_gpus;
-    int held_cpus = 0, held_gpus = 0; /* By running jobs of unknown length. */
-    int most_cpus = 0, most_gpus = 0; /* The most a waiting job so far asks for. */
     double now = looked_at = monotime();
     struct Plan pl = {0};
     struct Job *p, **fits, *chosen = NULL;
     int n = 0, i;
-    for (p = firstjob; p; p = p->next) {
-        if (p->state == QUEUED) ++n;
-        if (p->state == RUNNING && !p->estimate) {
-            held_cpus += p->num_slots;
-            held_gpus += p->num_gpus;
-        }
-    }
+    for (p = firstjob; p; p = p->next) n += p->state == QUEUED;
     if (!(fits = malloc((size_t)(n + 1) * sizeof(*fits))))
         error("Cannot allocate memory in next_run_job");
     n = 0;
-    for (p = firstjob; p; p = p->next) {
-        if (p->state != QUEUED) continue;
-        /* A job of unknown length leaves each job ahead of it what that job
-         * asks for, of whatever it uses itself, even if no job of unknown
-         * length ever ends. */
-        if (!p->kill_requested && p->num_slots <= free_cpus && p->num_gpus <= free_gpus &&
-            (p->estimate ||
-             (held_cpus + p->num_slots + most_cpus <= max_slots &&
-              (!p->num_gpus || held_gpus + p->num_gpus + most_gpus <= max_gpus))))
+    for (p = firstjob; p; p = p->next)
+        if (p->state == QUEUED && !p->kill_requested && p->num_slots <= free_cpus &&
+            p->num_gpus <= free_gpus)
             fits[n++] = p;
-        if (p->num_slots > most_cpus) most_cpus = p->num_slots;
-        if (p->num_gpus > most_gpus) most_gpus = p->num_gpus;
-    }
-    qsort(fits, (size_t)n, sizeof(*fits), fuller_first);
     if (n) {
-        plan_running(&pl, now);
+        qsort(fits, (size_t)n, sizeof(*fits), fuller_first);
+        plan_running(&pl, now, NULL);
         plan_waiting(&pl, NULL);
     }
+    /* A job the plan cannot place, as one of unknown length that would not
+     * leave a job ahead of it enough, does not start. */
     for (i = 0; i < n && !chosen; ++i) {
-        plan_running(&pl, now);
-        plan_take(&pl, now, length(fits[i]), fits[i]->num_slots, fits[i]->num_gpus);
+        if (fits[i]->planned == INFINITY) continue;
+        plan_running(&pl, now, fits[i]);
         if (plan_waiting(&pl, fits[i])) chosen = fits[i];
     }
     free(fits);
