@@ -408,10 +408,11 @@ static double plan_fit(const struct Plan *pl, const struct Job *job)
  *
  * A job of unknown length may hold what it takes for good. So it is placed
  * only if the jobs of unknown length that run, and it, still leave each job
- * ahead of it what that job asks for, of whatever it uses itself. */
+ * ahead of it that has no place what that job asks for, of whatever it uses
+ * itself. A job ahead that has a place is covered by its planned start. */
 static int plan_waiting(struct Plan *pl, const struct Job *ahead)
 {
-    int most_cpus = 0, most_gpus = 0; /* The most a job so far asks for. */
+    int most_cpus = 0, most_gpus = 0; /* The most a job with no place asks for. */
     struct Job *p;
     for (p = firstjob; p; p = p->next) {
         double start = INFINITY;
@@ -420,8 +421,10 @@ static int plan_waiting(struct Plan *pl, const struct Job *ahead)
             (pl->held_cpus + p->num_slots + most_cpus <= max_slots &&
              (!p->num_gpus || pl->held_gpus + p->num_gpus + most_gpus <= max_gpus)))
             start = plan_fit(pl, p);
-        if (p->num_slots > most_cpus) most_cpus = p->num_slots;
-        if (p->num_gpus > most_gpus) most_gpus = p->num_gpus;
+        if (start == INFINITY) {
+            if (p->num_slots > most_cpus) most_cpus = p->num_slots;
+            if (p->num_gpus > most_gpus) most_gpus = p->num_gpus;
+        }
         if (!ahead) p->planned = start;
         else {
             /* A job with no planned start has none to lose. */
