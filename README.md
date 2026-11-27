@@ -116,7 +116,7 @@ $ junban run -c 8 --estimate 2h python train.py
 
 The estimate is shown to jobs that are waiting. A job is never stopped for running past its estimate.
 
-A job with an estimate can also start ahead of waiting jobs (see [Good to know](#good-to-know)). Do not give a shorter time than you expect: a job that runs past its estimate delays the jobs it went ahead of.
+An estimate lets junban use idle CPUs: a job with one can start ahead of waiting jobs, and can let others start ahead of it, within limits (see [Good to know](#good-to-know)). Do not give a shorter time than you expect: a job that runs past its estimate delays the jobs it went ahead of.
 
 ### Tag your jobs
 
@@ -197,8 +197,13 @@ If you interrupt `junban run` itself, with Ctrl-C for example, the command it is
 
 ## Good to know
 
-- Jobs start in the order they were submitted, for each of CPUs and GPUs. A waiting job holds on to the CPUs and GPUs it asks for, so a job behind it starts only if it fits in what is left. A CPU job can therefore start while a GPU job ahead of it waits for the GPU, but never takes a CPU that job is waiting for. A job that needs all CPUs holds them all, so nothing behind it starts first. This keeps a large job from waiting forever while small jobs keep going ahead of it.
-- The one exception keeps CPUs from sitting idle while a large job waits. A job with an estimate may start in the free CPUs and GPUs if, by its estimate, it ends before the first waiting job could start, or if it uses only CPUs and GPUs that the first waiting job leaves free once it can start. Either way that job is not delayed. junban works that time out from the estimates of the running jobs, counting a job past its estimate as ending at once. If the first waiting job needs what a running job without an estimate holds, nothing goes ahead. A job without an estimate always waits its turn.
+- Jobs start in the order they were submitted. A later job starts first only if that costs each waiting job no more than its slack.
+  - Slack: a fifth of the time given with `--estimate`. A job started without `-c` (it takes all CPUs and is often a benchmark) and a job without an estimate have none, so nothing makes them start later.
+  - Cost: junban plans when each waiting job can start, from the estimates. What a job that starts ahead costs a waiting job is how much later that start becomes. Over all jobs that start ahead of it, this never adds up to more than its slack.
+  - Choice: of the jobs that may start, the one that fills the most of the free CPUs and GPU goes first. The GPU counts as much as all CPUs, so a GPU job does not leave the GPU idle when the CPU jobs ahead of it can wait.
+  - Without an estimate: junban counts only on what it was told, so such a job may run for good. It starts ahead of a waiting job only if all jobs without an estimate together still leave that job the CPUs and GPU it asks for. A job that waits for one of them to end has no planned start yet, and jobs with an estimate may start ahead of it.
+  - Overruns: a job past its estimate is expected to end a minute later, then 15, 30 and 60 minutes later, and so on. This moves the plan but uses up no one's slack.
+  - Tags and directories never change the order.
 - `junban run a && b` puts only `a` in the queue. To queue both, write `junban run sh -c 'a && b'`.
 - You cannot call `junban run` from inside a job that junban is running. It fails with an error (exit status 125). This keeps a job from waiting for itself and blocking the queue.
 - If a command exits and leaves child processes running in the background, `junban run` does not return until they finish.

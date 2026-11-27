@@ -463,7 +463,8 @@ static void server_loop(int ls)
 
     while (keep_loop)
     {
-        struct timeval interval = {0, 100000};
+        double wake = s_next_wake();
+        struct timeval limit = {(time_t)wake, (suseconds_t)((wake - (double)(time_t)wake) * 1e6)};
         /* Between requests, so no client message is half read. */
         if (staged) {
             live_upgrade(ls);
@@ -484,8 +485,7 @@ static void server_loop(int ls)
             if (client_cs[i].socket > maxfd)
                 maxfd = client_cs[i].socket;
         }
-        if (select(maxfd + 1, &readset, NULL, NULL,
-                   s_needs_poll() ? &interval : NULL) < 0) {
+        if (select(maxfd + 1, &readset, NULL, NULL, wake < 0 ? NULL : &limit) < 0) {
             if (errno == EINTR) continue;
             error("queue select failed");
         }

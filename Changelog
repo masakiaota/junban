@@ -6,6 +6,31 @@ agent-readable listings and wait notifications, a terminal watch view, and macOS
 idle-sleep prevention. Removed the old command-line interface and obsolete
 packaging, output capture, mail, dependencies, and queue-reordering features.
 
+v0.5.0 (scheduling by slack):
+ - Replaces EASY backfilling, which protected only the first waiting job
+   and protected it to the second. Now every waiting job has slack, a
+   fifth of the time given with --estimate, and a job starts ahead of
+   others only if that costs each waiting job no more than the slack it
+   has left. The cost is how much later junban's plan then starts the
+   job, so however many jobs start ahead of it, a job is delayed by no
+   more than its slack. A job started without -c and a job without an
+   estimate have no slack.
+ - Of the jobs that may start, the one that fills the most of the free
+   CPUs and GPU goes first, the GPU counting as much as all CPUs. A GPU
+   job no longer leaves the GPU idle behind CPU jobs that can wait.
+ - junban counts only on what it was told: a job without an estimate may
+   run for good. It starts ahead of a waiting job only if all jobs
+   without an estimate together leave that job what it asks for. While a
+   waiting job waits for one of them to end, jobs with an estimate may
+   start ahead of it. With no estimates at all, jobs keep their order as
+   before. Tags and directories never change the order.
+ - A running job past its estimate is expected to end a minute later,
+   then 15, 30 and 60 minutes later, and so on, instead of at once, and
+   the server wakes at those times. This uses up no one's slack.
+ - Slack that has been used is kept in the server only and starts over
+   after a live switch. No protocol or state change, so a 0.4.0 server
+   switches to this version in place.
+
 v0.4.0 (live upgrade):
  - After junban is upgraded, the running server switches to the new
    junban the next time any junban command connects. It notices that the

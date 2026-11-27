@@ -185,6 +185,10 @@ struct Job
     int finish_pending;
     int stop_kill_sent;
     double stop_deadline;
+    /* Scheduling, kept only in the server: how much of its slack the jobs
+     * started ahead of it have used, when the plan starts it (INFINITY if
+     * not yet), and how much later it would with a job started ahead. */
+    double delayed, planned, late;
 };
 
 /* Bounded display fields keep control characters and unbounded commands off
@@ -227,7 +231,7 @@ int s_has_jobs(void);
 void prevent_sleep(int active);
 void stop_sleep_prevention(void);
 int process_group_alive(int pgid);
-int s_needs_poll(void);
+double s_next_wake(void);
 void s_poll_jobs(void);
 void s_end_job(const struct Result *result, int jobid);
 

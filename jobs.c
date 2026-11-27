@@ -12,6 +12,7 @@
 #include <sys/time.h>
 #include <time.h>
 #include <signal.h>
+#include <math.h>
 #include "main.h"
 
 /* Slot accounting. junban treats the GPU as one device a job uses alone;
@@ -27,7 +28,7 @@ static struct Job *first_finished_job = 0;
 static int jobids = 0;
 int max_jobs;
 
-static int schedule(const struct Job *stop, int *short_cpus, int *short_gpus);
+static void shortage(const struct Job *job, int *short_cpus, int *short_gpus);
 
 
 static void send_list_line(int s, const char * str)
@@ -155,7 +156,7 @@ void s_wait_notice(int socket, int jobid)
     int ahead = 0, short_cpus = 0, short_gpus = 0;
     if (!job || job->state != QUEUED || job->kill_requested) return;
     for (p = firstjob; p && p != job; p = p->next) ++ahead;
-    schedule(job, &short_cpus, &short_gpus);
+    shortage(job, &short_cpus, &short_gpus);
     job_view(job, &queued);
     view_cpus(&queued, cpus, sizeof(cpus));
     snprintf(line, sizeof(line), "id=%d queued, cpus=%s, gpus=%d, %d ahead, waiting for %s\n",
@@ -233,6 +234,8 @@ int s_newjob(int s, struct msg *m)
     p->client_lost = 0;
     p->finish_pending = p->stop_kill_sent = 0;
     p->stop_deadline = 0;
+    p->delayed = p->late = 0;
+    p->planned = INFINITY;
     p->num_slots = p->cpus_unspecified ? max_slots : m->u.newjob.num_slots;
     p->num_gpus = m->u.newjob.num_gpus;
     p->pid = 0;
@@ -271,116 +274,219 @@ disconnected:
     return -1;
 }
 
-/* A running job with an estimate: when it ends and what it gives back. */
-struct End {
+/* Scheduling.
+ *
+ * Jobs start in the order they were submitted. A job starts ahead of others
+ * only if that costs each waiting job no more than its slack: a fifth of the
+ * time it was said to take (--estimate). A job started without -c, often a
+ * benchmark, and a job of unknown length have no slack.
+ *
+ * junban counts only on what it was told. A job without an estimate may run
+ * for good, whether it is running, waiting or about to start. So the plan
+ * frees what a running job holds only at a known end, and a waiting job that
+ * needs more than that has no planned start yet: until it has one, jobs of
+ * known length may start ahead of it, since they end. A job of unknown
+ * length starts ahead of a waiting job only if all jobs of unknown length
+ * together leave that job what it asks for.
+ *
+ * The plan places the waiting jobs in queue order, each at the earliest time
+ * it fits without moving an earlier one. What starting a job ahead costs a
+ * waiting job is how much later the plan then starts it. A job that ends
+ * early or late moves the plan too, but that uses up no one's slack. */
+
+#define SLACK_SHARE 0.2
+
+/* What is free from at until the next step, and after the last one for good. */
+struct Step {
     double at;
     int cpus, gpus;
 };
 
-static int end_order(const void *a, const void *b)
+struct Plan {
+    struct Step *step;
+    int n, cap;
+};
+
+static double slack(const struct Job *job)
 {
-    double x = ((const struct End *)a)->at, y = ((const struct End *)b)->at;
-    return (x > y) - (x < y);
+    return job->cpus_unspecified ? 0 : SLACK_SHARE * (double)job->estimate;
 }
 
-/* When job could start by the estimates of the running jobs: the earliest
- * end after which its CPUs and GPUs are free. A job past its estimate
- * counts as ending now. -1 if a job without an estimate must end first.
- * *extra_cpus and *extra_gpus get what job leaves free at that time. */
-static double start_time(const struct Job *job, double now, int *extra_cpus, int *extra_gpus)
+/* How long a job holds what it uses, as far as junban was told. */
+static double length(const struct Job *job)
 {
-    int cpus = max_slots - busy_slots, gpus = max_gpus - busy_gpus, n = 0, i;
-    double at = now;
-    struct End *ends;
+    return job->estimate ? (double)job->estimate : INFINITY;
+}
+
+/* When a running job is expected to end. Most overruns are short, so a job
+ * past its estimate is expected a minute later, then 15, 30, 60 minutes
+ * later and so on (Tsafrir, Etsion and Feitelson, 2007). */
+static double expected_end(const struct Job *job, double now)
+{
+    double end = job->started_at + length(job), more = 60;
+    for (; end <= now; more = more == 60 ? 900 : more * 2) end += more;
+    return end;
+}
+
+static void plan_insert(struct Plan *pl, int i, struct Step step)
+{
+    if (pl->n == pl->cap) {
+        pl->cap = pl->cap ? pl->cap * 2 : 64;
+        if (!(pl->step = realloc(pl->step, (size_t)pl->cap * sizeof(*pl->step))))
+            error("Cannot allocate memory for the plan");
+    }
+    memmove(pl->step + i + 1, pl->step + i, (size_t)(pl->n - i) * sizeof(*pl->step));
+    pl->step[i] = step;
+    ++pl->n;
+}
+
+/* Start a step at t, if none does, and return its index. */
+static int plan_split(struct Plan *pl, double t)
+{
+    int i = pl->n - 1;
+    while (pl->step[i].at > t) --i;
+    if (pl->step[i].at == t) return i;
+    plan_insert(pl, i + 1, (struct Step){t, pl->step[i].cpus, pl->step[i].gpus});
+    return i + 1;
+}
+
+/* Take cpus and gpus from start for run seconds. */
+static void plan_take(struct Plan *pl, double start, double run, int cpus, int gpus)
+{
+    int i = plan_split(pl, start);
+    int end = start + run < INFINITY ? plan_split(pl, start + run) : pl->n;
+    for (; i < end; ++i) {
+        pl->step[i].cpus -= cpus;
+        pl->step[i].gpus -= gpus;
+    }
+}
+
+/* What is free from now on, as the running jobs of known length end. */
+static void plan_running(struct Plan *pl, double now)
+{
+    const struct Job *p;
+    pl->n = 0;
+    plan_insert(pl, 0, (struct Step){now, max_slots - busy_slots, max_gpus - busy_gpus});
+    for (p = firstjob; p; p = p->next)
+        if (p->state == RUNNING && p->estimate)
+            plan_take(pl, expected_end(p, now), INFINITY, -p->num_slots, -p->num_gpus);
+}
+
+/* The earliest time job fits for its whole length; INFINITY if never. */
+static double plan_fit(const struct Plan *pl, const struct Job *job)
+{
+    double run = length(job);
+    int i, j;
+    for (i = 0; i < pl->n; i = j + 1) {
+        for (j = i; j < pl->n && pl->step[j].at < pl->step[i].at + run; ++j)
+            if (pl->step[j].cpus < job->num_slots || pl->step[j].gpus < job->num_gpus) break;
+        if (j == pl->n || pl->step[j].at >= pl->step[i].at + run) return pl->step[i].at;
+    }
+    return INFINITY;
+}
+
+/* Place the waiting jobs in queue order. With no job started ahead, note
+ * each planned start. With one, note how much later each job then starts,
+ * and return 0 once that is more than the job's slack has left. */
+static int plan_waiting(struct Plan *pl, const struct Job *ahead)
+{
     struct Job *p;
-    for (p = firstjob; p; p = p->next)
-        if (p->state == RUNNING && p->estimate) ++n;
-    if (!(ends = malloc((size_t)(n + 1) * sizeof(*ends))))
-        error("Cannot allocate memory in start_time");
-    n = 0;
-    for (p = firstjob; p; p = p->next)
-        if (p->state == RUNNING && p->estimate) {
-            double end = p->started_at + (double)p->estimate;
-            ends[n++] = (struct End){end > now ? end : now, p->num_slots, p->num_gpus};
+    for (p = firstjob; p; p = p->next) {
+        double start;
+        if (p->state != QUEUED || p == ahead) continue;
+        start = plan_fit(pl, p);
+        if (!ahead) p->planned = start;
+        else {
+            /* A job with no planned start has none to lose. */
+            p->late = start > p->planned ? start - p->planned : 0;
+            if (p->delayed + p->late > slack(p)) return 0;
         }
-    qsort(ends, (size_t)n, sizeof(*ends), end_order);
-    for (i = 0; i < n && (cpus < job->num_slots || gpus < job->num_gpus); ++i) {
-        at = ends[i].at;
-        cpus += ends[i].cpus;
-        gpus += ends[i].gpus;
+        if (start < INFINITY) plan_take(pl, start, length(p), p->num_slots, p->num_gpus);
     }
-    /* Jobs that end at the same time free their CPUs and GPUs together. */
-    for (; i < n && ends[i].at == at; ++i) {
-        cpus += ends[i].cpus;
-        gpus += ends[i].gpus;
-    }
-    free(ends);
-    if (cpus < job->num_slots || gpus < job->num_gpus) {
-        *extra_cpus = *extra_gpus = 0;
-        return -1;
-    }
-    *extra_cpus = cpus - job->num_slots;
-    *extra_gpus = gpus - job->num_gpus;
-    return at;
+    return 1;
 }
 
-/* Per-resource FIFO with backfilling. Jobs are taken in queue order. A job
- * that cannot start reserves what it asks for, so a later job may start
- * only within what is left after every earlier queued job's reservation.
- * A later job therefore never takes a CPU or GPU an earlier job is waiting
- * for, yet it may pass a job that waits only for a resource it does not
- * use. Every job uses at least one CPU, so once the reservations cover all
- * CPUs nothing behind can start, which keeps a job that needs all CPUs
- * from starving.
- *
- * The one exception is EASY backfilling. A later job with an estimate may
- * use any free CPUs and GPUs if, by its estimate, it ends before the first
- * waiting job could start, or if it uses only what that job leaves free
- * once it can start. Either way it does not delay that job.
- *
- * Returns the job's remaining shortage in *short_cpus and *short_gpus when
- * stop is given and reached, for the wait notice. -1 if no one should run. */
-static int schedule(const struct Job *stop, int *short_cpus, int *short_gpus)
+/* How much of the machine a job fills. The GPU counts as much as all CPUs:
+ * it is the scarcer, and every job that uses it uses a CPU too. */
+static double fill(const struct Job *job)
+{
+    return (double)job->num_slots / max_slots +
+           (max_gpus ? (double)job->num_gpus / max_gpus : 0);
+}
+
+static int fuller_first(const void *a, const void *b)
+{
+    const struct Job *x = *(const struct Job *const *)a, *y = *(const struct Job *const *)b;
+    if (fill(x) != fill(y)) return fill(x) < fill(y) ? 1 : -1;
+    return (x->jobid > y->jobid) - (x->jobid < y->jobid);
+}
+
+/* The job to start now, or -1. Of the jobs that may start, the one that
+ * fills the most of the machine goes first, so the GPU does not sit idle
+ * behind CPU jobs that can wait. */
+int next_run_job(void)
 {
     int free_cpus = max_slots - busy_slots, free_gpus = max_gpus - busy_gpus;
-    int idle_cpus = free_cpus, idle_gpus = free_gpus;
-    double now = monotime(), deadline = -1;
-    int blocked = 0, extra_cpus = 0, extra_gpus = 0;
-    struct Job *p;
-    /* The notice scans up to its job even when no CPU is left, so it also
-     * sees the GPUs that earlier jobs reserve. */
-    for (p = firstjob; p != 0 && (stop || free_cpus > 0 || deadline >= 0); p = p->next) {
+    int held_cpus = 0, held_gpus = 0; /* By running jobs of unknown length. */
+    int most_cpus = 0, most_gpus = 0; /* The most a waiting job so far asks for. */
+    double now = monotime();
+    struct Plan pl = {0};
+    struct Job *p, **fits, *chosen = NULL;
+    int n = 0, i;
+    for (p = firstjob; p; p = p->next) {
+        if (p->state == QUEUED) ++n;
+        if (p->state == RUNNING && !p->estimate) {
+            held_cpus += p->num_slots;
+            held_gpus += p->num_gpus;
+        }
+    }
+    if (!(fits = malloc((size_t)(n + 1) * sizeof(*fits))))
+        error("Cannot allocate memory in next_run_job");
+    n = 0;
+    for (p = firstjob; p; p = p->next) {
         if (p->state != QUEUED) continue;
-        /* A job being killed in the queue keeps its reservation until it goes. */
-        int fits = !p->kill_requested && p->num_slots <= free_cpus &&
-                   p->num_gpus <= free_gpus;
-        int backfills = !p->kill_requested && deadline >= 0 && p->estimate &&
-                        p->num_slots <= idle_cpus && p->num_gpus <= idle_gpus &&
-                        (now + (double)p->estimate <= deadline ||
-                         (p->num_slots <= extra_cpus && p->num_gpus <= extra_gpus));
-        if (p == stop) {
-            *short_cpus = p->num_slots > free_cpus;
-            *short_gpus = p->num_gpus > free_gpus;
-            return -1;
-        }
-        if ((fits || backfills) && !stop) {
-            busy_slots = busy_slots + p->num_slots;
-            busy_gpus = busy_gpus + p->num_gpus;
-            return p->jobid;
-        }
-        if (!blocked && !stop) {
-            blocked = 1;
-            deadline = start_time(p, now, &extra_cpus, &extra_gpus);
-        }
+        /* A job of unknown length leaves each job ahead of it what that job
+         * asks for, of whatever it uses itself, even if no job of unknown
+         * length ever ends. */
+        if (!p->kill_requested && p->num_slots <= free_cpus && p->num_gpus <= free_gpus &&
+            (p->estimate ||
+             (held_cpus + p->num_slots + most_cpus <= max_slots &&
+              (!p->num_gpus || held_gpus + p->num_gpus + most_gpus <= max_gpus))))
+            fits[n++] = p;
+        if (p->num_slots > most_cpus) most_cpus = p->num_slots;
+        if (p->num_gpus > most_gpus) most_gpus = p->num_gpus;
+    }
+    qsort(fits, (size_t)n, sizeof(*fits), fuller_first);
+    plan_running(&pl, now);
+    plan_waiting(&pl, NULL);
+    for (i = 0; i < n && !chosen; ++i) {
+        plan_running(&pl, now);
+        plan_take(&pl, now, length(fits[i]), fits[i]->num_slots, fits[i]->num_gpus);
+        if (plan_waiting(&pl, fits[i])) chosen = fits[i];
+    }
+    free(fits);
+    free(pl.step);
+    if (!chosen) return -1;
+    for (p = firstjob; p; p = p->next)
+        if (p->state == QUEUED && p != chosen) p->delayed += p->late;
+    busy_slots += chosen->num_slots;
+    busy_gpus += chosen->num_gpus;
+    return chosen->jobid;
+}
+
+/* What a waiting job lacks once the jobs ahead of it take what they ask
+ * for, for the wait notice. */
+static void shortage(const struct Job *job, int *short_cpus, int *short_gpus)
+{
+    int free_cpus = max_slots - busy_slots, free_gpus = max_gpus - busy_gpus;
+    const struct Job *p;
+    for (p = firstjob; p != job; p = p->next) {
+        if (p->state != QUEUED) continue;
         free_cpus = free_cpus > p->num_slots ? free_cpus - p->num_slots : 0;
         free_gpus = free_gpus > p->num_gpus ? free_gpus - p->num_gpus : 0;
     }
-    return -1;
-}
-
-int next_run_job()
-{
-    return schedule(NULL, NULL, NULL);
+    *short_cpus = job->num_slots > free_cpus;
+    *short_gpus = job->num_gpus > free_gpus;
 }
 
 /* junban keeps the results of the last 1000 finished jobs, so junban wait
@@ -562,12 +668,21 @@ void s_end_job(const struct Result *result, int jobid)
     job_finished(result, jobid);
 }
 
-int s_needs_poll(void)
+/* Seconds until the server should look at the jobs again unasked: shortly
+ * while a stopped job's processes are going away, else when a running job
+ * reaches its expected end, which moves the plan. -1 if never. */
+double s_next_wake(void)
 {
     struct Job *job;
-    for (job = firstjob; job; job = job->next)
-        if (job->finish_pending || job->stop_deadline) return 1;
-    return 0;
+    double now = monotime(), wake = -1;
+    for (job = firstjob; job; job = job->next) {
+        if (job->finish_pending || job->stop_deadline) return 0.1;
+        if (job->state == RUNNING && job->estimate &&
+            (wake < 0 || expected_end(job, now) - now < wake))
+            wake = expected_end(job, now) - now;
+    }
+    /* select() refuses a very long wait, and waking early costs nothing. */
+    return wake > 3600 ? 3600 : wake;
 }
 
 void s_poll_jobs(void)
