@@ -483,22 +483,22 @@ class QueueTests(unittest.TestCase):
             # b can start when a ends. It has no estimate, so no slack.
             b = q.start("b", 3)
             q.wait_rows(2)
-            # z would still run when a ends, leaving b too few CPUs.
-            z = q.start("z", 2, estimate="2h")
-            q.wait_rows(3)
             # n1 may hold its CPU for good: b still gets three when a ends.
             n1 = q.start("n1", 1)
             q.pids("n1")
             # n2 would leave b only two, so it waits.
             n2 = q.start("n2", 1)
+            q.wait_rows(4)
+            # z would still run when a ends, leaving b too few CPUs.
+            z = q.start("z", 1, estimate="2h")
             q.wait_rows(5)
             # x ends before a, so it takes the last CPU.
             x = q.start("x", 1, estimate="10m")
             q.pids("x")
             time.sleep(0.15)
-            self.assertEqual(states(), {0: "running", 1: "queued", 2: "queued",
-                                        3: "running", 4: "queued", 5: "running"})
-            for name in ("z", "n2"):
+            self.assertEqual(states(), {0: "running", 1: "queued", 2: "running",
+                                        3: "queued", 4: "queued", 5: "running"})
+            for name in ("n2", "z"):
                 self.assertFalse((q.path / (name + ".pids")).exists())
             for name, p in (("x", x), ("a", a)):
                 q.release(name)
@@ -507,7 +507,65 @@ class QueueTests(unittest.TestCase):
                 q.pids(name)
                 q.release(name)
                 self.assertEqual(p.wait(timeout=3), 0)
-            for name, p in (("z", z), ("n2", n2)):
+            for name, p in (("n2", n2), ("z", z)):
+                q.pids(name)
+                q.release(name)
+                self.assertEqual(p.wait(timeout=3), 0)
+
+    def test_first_job_of_unknown_length_starts(self):
+        with Queue(4) as q:
+            def states():
+                return dict(q.rows())
+            r = q.start("r", 2, estimate="1h")
+            q.pids("r")
+            x = q.start("x", 2)
+            q.pids("x")
+            a = q.start("a", 2)
+            q.wait_rows(3)
+            b = q.start("b", 3)
+            q.wait_rows(4)
+            c = q.start("c", 1)
+            q.wait_rows(5)
+            # a is first and fits. b and c behind it have no place either
+            # way, so they do not keep a from starting.
+            q.release("x")
+            self.assertEqual(x.wait(timeout=3), 0)
+            q.pids("a")
+            self.assertEqual(states(), {0: "running", 2: "running", 3: "queued", 4: "queued"})
+            for name, p in (("r", r), ("a", a)):
+                q.release(name)
+                self.assertEqual(p.wait(timeout=3), 0)
+            for name, p in (("b", b), ("c", c)):
+                q.pids(name)
+                q.release(name)
+                self.assertEqual(p.wait(timeout=3), 0)
+
+    def test_job_with_no_place_may_still_start_ahead(self):
+        with Queue(4) as q:
+            def states():
+                return dict(q.rows())
+            r = q.start("r", 1, estimate="10m")
+            q.pids("r")
+            x = q.start("x", 3)
+            q.pids("x")
+            b = q.start("b", 2, estimate="1h")
+            q.wait_rows(3)
+            n = q.start("n", 2)
+            q.wait_rows(4)
+            # The plan starts b now and n when r ends, which leaves g no
+            # place. Started now, g holds b back nine minutes of its 12 of
+            # slack, and n not at all.
+            g = q.start("g", 3, gpus=1, estimate="9m")
+            q.wait_rows(5)
+            q.release("x")
+            self.assertEqual(x.wait(timeout=3), 0)
+            q.pids("g")
+            time.sleep(0.15)
+            self.assertEqual(states(), {0: "running", 2: "queued", 3: "queued", 4: "running"})
+            for name, p in (("g", g), ("r", r)):
+                q.release(name)
+                self.assertEqual(p.wait(timeout=3), 0)
+            for name, p in (("b", b), ("n", n)):
                 q.pids(name)
                 q.release(name)
                 self.assertEqual(p.wait(timeout=3), 0)

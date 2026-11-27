@@ -307,7 +307,6 @@ struct Step {
 struct Plan {
     struct Step *step;
     int n, cap;
-    int held_cpus, held_gpus; /* By the jobs of unknown length that run. */
 };
 
 static double slack(const struct Job *job)
@@ -364,29 +363,18 @@ static void plan_take(struct Plan *pl, double start, double run, int cpus, int g
     }
 }
 
-/* A job that runs gives back what it holds at its end, if that is known. */
-static void plan_run(struct Plan *pl, const struct Job *job, double end)
-{
-    if (end < INFINITY) plan_take(pl, end, INFINITY, -job->num_slots, -job->num_gpus);
-    else {
-        pl->held_cpus += job->num_slots;
-        pl->held_gpus += job->num_gpus;
-    }
-}
-
-/* What is free from now on, as the running jobs end, with the waiting job
- * starting, if any, started now. */
+/* What is free from now on, as the running jobs of known length end, with
+ * the waiting job starting, if any, started now. */
 static void plan_running(struct Plan *pl, double now, const struct Job *starting)
 {
     const struct Job *p;
-    pl->n = pl->held_cpus = pl->held_gpus = 0;
+    pl->n = 0;
     plan_insert(pl, 0, (struct Step){now, max_slots - busy_slots, max_gpus - busy_gpus});
     for (p = firstjob; p; p = p->next)
-        if (p->state == RUNNING) plan_run(pl, p, expected_end(p, now));
-    if (starting) {
-        plan_take(pl, now, INFINITY, starting->num_slots, starting->num_gpus);
-        plan_run(pl, starting, now + length(starting));
-    }
+        if (p->state == RUNNING && p->estimate)
+            plan_take(pl, expected_end(p, now), INFINITY, -p->num_slots, -p->num_gpus);
+    if (starting)
+        plan_take(pl, now, length(starting), starting->num_slots, starting->num_gpus);
 }
 
 /* The earliest time job fits for its whole length; INFINITY if never. */
@@ -406,20 +394,21 @@ static double plan_fit(const struct Plan *pl, const struct Job *job)
  * each planned start. With one, note how much later each job then starts,
  * and return 0 once that is more than the job's slack has left.
  *
- * A job of unknown length may hold what it takes for good. So it is placed
- * only if the jobs of unknown length that run, and it, still leave each job
- * ahead of it that has no place what that job asks for, of whatever it uses
- * itself. A job ahead that has a place is covered by its planned start. */
+ * A job of unknown length may hold what it takes for good. So it gets a
+ * place only if what then stays free for good, the last step, still covers
+ * each job ahead of it that has no place, of whatever it uses itself. A job
+ * ahead that has a place is covered by its planned start. */
 static int plan_waiting(struct Plan *pl, const struct Job *ahead)
 {
     int most_cpus = 0, most_gpus = 0; /* The most a job with no place asks for. */
     struct Job *p;
     for (p = firstjob; p; p = p->next) {
+        const struct Step *last = &pl->step[pl->n - 1];
         double start = INFINITY;
         if (p->state != QUEUED || p == ahead) continue;
         if (p->estimate ||
-            (pl->held_cpus + p->num_slots + most_cpus <= max_slots &&
-             (!p->num_gpus || pl->held_gpus + p->num_gpus + most_gpus <= max_gpus)))
+            (last->cpus - p->num_slots >= most_cpus &&
+             (!p->num_gpus || last->gpus - p->num_gpus >= most_gpus)))
             start = plan_fit(pl, p);
         if (start == INFINITY) {
             if (p->num_slots > most_cpus) most_cpus = p->num_slots;
@@ -474,10 +463,10 @@ int next_run_job(void)
         plan_running(&pl, now, NULL);
         plan_waiting(&pl, NULL);
     }
-    /* A job the plan cannot place, as one of unknown length that would not
-     * leave a job ahead of it enough, does not start. */
+    /* A job of unknown length that the plan gives no place would not leave
+     * a job ahead of it enough, so it does not start. */
     for (i = 0; i < n && !chosen; ++i) {
-        if (fits[i]->planned == INFINITY) continue;
+        if (!fits[i]->estimate && fits[i]->planned == INFINITY) continue;
         plan_running(&pl, now, fits[i]);
         if (plan_waiting(&pl, fits[i])) chosen = fits[i];
     }
