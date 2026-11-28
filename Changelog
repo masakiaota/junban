@@ -17,10 +17,12 @@ v0.5.0 (scheduling by slack):
    estimate have no slack.
  - A job that uses the GPU lines up ahead of the waiting jobs that can
    run beside it, so the GPU is no longer left idle behind CPU jobs. They
-   give up only the CPUs it asks for. It stays behind earlier GPU jobs
+   give up only the CPUs of one GPU job. It stays behind earlier GPU jobs
    and behind a job that cannot run beside it, such as one started
    without -c. This needs no estimates. junban ls lists the waiting jobs
    in the order of the line, so job IDs there are no longer in order.
+ - A job that waits only for the GPU no longer keeps CPUs free: the job
+   that holds the GPU gives its CPUs back with it.
  - junban counts only on what it was told: a job without an estimate may
    run for good. It starts ahead of a waiting job only if all jobs
    without an estimate together leave that job what it asks for. While a

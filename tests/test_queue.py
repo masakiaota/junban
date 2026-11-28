@@ -392,16 +392,14 @@ class QueueTests(unittest.TestCase):
             self.assertEqual(states(), {0: "running", 1: "queued", 2: "running"})
             self.assertEqual(q.call("ls", "--summary"),
                              (0, b"cpus 3/4 gpus 1/1 running 2 queued 1\n", b""))
-            # g2 reserves the last free CPU, so a later one-CPU job waits.
+            # g2 waits only for the GPU, which comes back with g1's CPU, so
+            # d takes the last free one.
             d = q.start("d", 1)
-            q.wait_rows(4)
-            time.sleep(0.15)
-            self.assertFalse((q.path / "d.pids").exists())
+            q.pids("d")
+            self.assertEqual(states(), {0: "running", 1: "queued", 2: "running", 3: "running"})
             q.release("g1")
             self.assertEqual(g1.wait(timeout=3), 0)
-            # g2 starts and its reservation goes, so d takes the last CPU.
             q.pids("g2")
-            q.pids("d")
             self.assertEqual(states(), {1: "running", 2: "running", 3: "running"})
             q.release("g2")
             self.assertEqual(g2.wait(timeout=3), 0)
@@ -702,6 +700,31 @@ class QueueTests(unittest.TestCase):
             self.assertEqual(r2.wait(timeout=3), 0)
             q.pids("s")
             for name, p in (("g", g), ("s", s)):
+                q.release(name)
+                self.assertEqual(p.wait(timeout=3), 0)
+
+    def test_cpu_job_runs_beside_gpu_jobs_that_keep_waiting(self):
+        with Queue(4) as q:
+            r = q.start("r")
+            q.pids("r")
+            c = q.start("c", 2)
+            q.wait_rows(2)
+            g1 = q.start("g1", 2, gpus=1)
+            q.wait_rows(3)
+            g2 = q.start("g2", 2, gpus=1)
+            self.assertEqual(q.wait_rows(4), [(0, "running"), (2, "queued"),
+                                              (3, "queued"), (1, "queued")])
+            q.release("r")
+            self.assertEqual(r.wait(timeout=3), 0)
+            # g2 waits only for the GPU. It keeps no CPUs free, so c runs
+            # beside g1 however many GPU jobs wait.
+            q.pids("g1")
+            q.pids("c")
+            self.assertEqual(dict(q.rows()), {1: "running", 2: "running", 3: "queued"})
+            q.release("g1")
+            self.assertEqual(g1.wait(timeout=3), 0)
+            q.pids("g2")
+            for name, p in (("c", c), ("g2", g2)):
                 q.release(name)
                 self.assertEqual(p.wait(timeout=3), 0)
 

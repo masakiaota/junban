@@ -214,9 +214,10 @@ static int recv_string(int s, int size, char **dst)
 
 /* A job joins the end of the line. A job that uses a GPU instead lines up
  * ahead of the waiting jobs that can run beside it, so the GPU does not sit
- * idle while they use the CPUs. They lose only the CPUs it asks for, since no
- * more GPU jobs run at once than there are GPUs. It stays behind a waiting
- * job that uses a GPU too, and behind one it would leave too few CPUs. */
+ * idle while they use the CPUs. They give up only the CPUs it asks for,
+ * since no more GPU jobs run at once than there are GPUs. It stays behind a
+ * waiting job that uses a GPU too, and behind one it would leave too few
+ * CPUs. */
 static void line_up(struct Job *job)
 {
     struct Job **p, **place = NULL; /* The link to the first job it goes ahead of. */
@@ -306,7 +307,7 @@ disconnected:
  * needs more than that has no planned start yet: until it has one, jobs of
  * known length may start ahead of it, since they end. A job of unknown
  * length starts ahead of a waiting job only if all jobs of unknown length
- * together leave that job what it asks for. Nothing starts ahead of a job
+ * together leave that job what it waits for. Nothing starts ahead of a job
  * started without -c that has no planned start: junban cannot tell what
  * would make it start later.
  *
@@ -417,17 +418,21 @@ static double plan_fit(const struct Plan *pl, const struct Job *job)
  * ahead, note each planned start. With one, note how much later each job
  * then starts, and return 0 once that is more than the job's slack has left.
  *
- * A job of unknown length may hold what it takes for good. So it gets a
- * place only if what then stays free for good, the last step, still covers
- * each job ahead of it that has no place, of whatever it uses itself. A job
- * ahead that has a place is covered by its planned start.
+ * A job with no place asks for more CPUs or GPUs than stay free for good,
+ * the last step. A job of unknown length may hold what it takes for good,
+ * so behind a job short of CPUs it gets no place, and behind one short of
+ * GPUs none if it uses a GPU. A job short of the GPU alone needs no CPUs
+ * kept: it starts when the job that holds the GPU ends, which gives back
+ * its CPUs too. A job ahead that has a place is covered by its planned
+ * start.
  *
  * Behind a job started without -c that has no place, no job gets one, and
  * none starts. */
 static int plan_waiting(struct Plan *pl, const struct Job *ahead)
 {
-    int most_cpus = 0, most_gpus = 0; /* The most a job with no place asks for. */
-    int shut = 0; /* Whether a job started without -c has no place. */
+    /* Whether a job with no place is short of CPUs, is short of GPUs, or was
+     * started without -c. */
+    int no_cpus = 0, no_gpus = 0, shut = 0;
     struct Job *p;
     for (p = firstjob; p; p = p->next) {
         const struct Step *last = &pl->step[pl->n - 1];
@@ -437,13 +442,11 @@ static int plan_waiting(struct Plan *pl, const struct Job *ahead)
             if (shut) return 0;
             continue;
         }
-        if (!shut && (p->estimate ||
-                      (last->cpus - p->num_slots >= most_cpus &&
-                       (!p->num_gpus || last->gpus - p->num_gpus >= most_gpus))))
+        if (!shut && (p->estimate || (!no_cpus && (!p->num_gpus || !no_gpus))))
             start = plan_fit(pl, p);
         if (start == INFINITY) {
-            if (p->num_slots > most_cpus) most_cpus = p->num_slots;
-            if (p->num_gpus > most_gpus) most_gpus = p->num_gpus;
+            no_cpus |= p->num_slots > last->cpus;
+            no_gpus |= p->num_gpus > last->gpus;
             shut |= p->cpus_unspecified;
         }
         if (!ahead) p->planned = start;
