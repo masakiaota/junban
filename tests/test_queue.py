@@ -392,16 +392,14 @@ class QueueTests(unittest.TestCase):
             self.assertEqual(states(), {0: "running", 1: "queued", 2: "running"})
             self.assertEqual(q.call("ls", "--summary"),
                              (0, b"cpus 3/4 gpus 1/1 running 2 queued 1\n", b""))
-            # g2 reserves the last free CPU, so a later one-CPU job waits.
+            # g2 waits only for the GPU, which comes back with g1's CPU, so
+            # d takes the last free one.
             d = q.start("d", 1)
-            q.wait_rows(4)
-            time.sleep(0.15)
-            self.assertFalse((q.path / "d.pids").exists())
+            q.pids("d")
+            self.assertEqual(states(), {0: "running", 1: "queued", 2: "running", 3: "running"})
             q.release("g1")
             self.assertEqual(g1.wait(timeout=3), 0)
-            # g2 starts and its reservation goes, so d takes the last CPU.
             q.pids("g2")
-            q.pids("d")
             self.assertEqual(states(), {1: "running", 2: "running", 3: "running"})
             q.release("g2")
             self.assertEqual(g2.wait(timeout=3), 0)
@@ -474,88 +472,353 @@ class QueueTests(unittest.TestCase):
             self.assertEqual(e.wait(timeout=3), 0)
 
 
-    def test_backfill_uses_what_the_first_waiting_job_leaves_free(self):
+    def test_job_without_estimate_takes_only_what_no_one_needs(self):
         with Queue(4) as q:
-            a = q.start("a", 3, estimate="1h")
+            def states():
+                return dict(q.rows())
+            a = q.start("a", 2, estimate="1h")
             q.pids("a")
-            # b can start when a ends; four CPUs are free then and b needs
-            # three, so one CPU and the GPU are left over.
+            # b can start when a ends. It has no estimate, so no slack.
             b = q.start("b", 3)
             q.wait_rows(2)
-            # n has no estimate, so it waits its turn.
-            n = q.start("n", 1)
-            q.wait_rows(3)
-            # x outlasts a, but it uses only what b leaves free.
-            x = q.start("x", 1, gpus=1, estimate="2h")
+            # n1 may hold its CPU for good: b still gets three when a ends.
+            n1 = q.start("n1", 1)
+            q.pids("n1")
+            # n2 would leave b only two, so it waits.
+            n2 = q.start("n2", 1)
+            q.wait_rows(4)
+            # z would still run when a ends, leaving b too few CPUs.
+            z = q.start("z", 1, estimate="2h")
+            q.wait_rows(5)
+            # x ends before a, so it takes the last CPU.
+            x = q.start("x", 1, estimate="10m")
             q.pids("x")
             time.sleep(0.15)
-            self.assertFalse((q.path / "n.pids").exists())
-            q.release("a")
-            self.assertEqual(a.wait(timeout=3), 0)
-            for name, p in (("b", b), ("x", x), ("n", n)):
+            self.assertEqual(states(), {0: "running", 1: "queued", 2: "running",
+                                        3: "queued", 4: "queued", 5: "running"})
+            for name in ("n2", "z"):
+                self.assertFalse((q.path / (name + ".pids")).exists())
+            for name, p in (("x", x), ("a", a)):
+                q.release(name)
+                self.assertEqual(p.wait(timeout=3), 0)
+            for name, p in (("b", b), ("n1", n1)):
+                q.pids(name)
+                q.release(name)
+                self.assertEqual(p.wait(timeout=3), 0)
+            for name, p in (("n2", n2), ("z", z)):
                 q.pids(name)
                 q.release(name)
                 self.assertEqual(p.wait(timeout=3), 0)
 
-    def test_backfill_counts_jobs_ending_together(self):
+    def test_first_job_of_unknown_length_starts(self):
         with Queue(4) as q:
-            a1 = q.start("a1", 1, estimate="1s")
-            q.pids("a1")
-            a2 = q.start("a2", 1, estimate="1s")
-            q.pids("a2")
-            time.sleep(1.3)
-            # a1 and a2 are overdue, so both count as ending now: four CPUs
-            # are free then, b needs three, and one is left over for x.
-            b = q.start("b", 3)
-            q.wait_rows(3)
-            x = q.start("x", 1, estimate="1h")
+            def states():
+                return dict(q.rows())
+            r = q.start("r", 2, estimate="1h")
+            q.pids("r")
+            x = q.start("x", 2)
             q.pids("x")
-            for name, p in (("a1", a1), ("a2", a2), ("b", b), ("x", x)):
+            a = q.start("a", 2)
+            q.wait_rows(3)
+            b = q.start("b", 3)
+            q.wait_rows(4)
+            c = q.start("c", 1)
+            q.wait_rows(5)
+            # a is first and fits. b and c behind it have no place either
+            # way, so they do not keep a from starting.
+            q.release("x")
+            self.assertEqual(x.wait(timeout=3), 0)
+            q.pids("a")
+            self.assertEqual(states(), {0: "running", 2: "running", 3: "queued", 4: "queued"})
+            for name, p in (("r", r), ("a", a)):
+                q.release(name)
+                self.assertEqual(p.wait(timeout=3), 0)
+            for name, p in (("b", b), ("c", c)):
+                q.pids(name)
+                q.release(name)
+                self.assertEqual(p.wait(timeout=3), 0)
+
+    def test_unknown_end_lets_estimated_jobs_go_ahead(self):
+        with Queue(4) as q:
+            a = q.start("a", 2)
+            q.pids("a")
+            # b's start depends on a, which has no estimate. Until a ends,
+            # any job with an estimate ends before b could start.
+            b = q.start("b", 4)
+            q.wait_rows(2)
+            c = q.start("c", 1, estimate="1h")
+            q.pids("c")
+            # n has no estimate either and would keep b from ever starting.
+            n = q.start("n", 1)
+            q.wait_rows(4)
+            time.sleep(0.15)
+            self.assertFalse((q.path / "n.pids").exists())
+            for name, p in (("a", a), ("c", c), ("b", b), ("n", n)):
+                if name in ("b", "n"):
+                    q.pids(name)
+                q.release(name)
+                self.assertEqual(p.wait(timeout=3), 0)
+
+    def test_jobs_of_unknown_length_do_not_keep_passing_a_big_one(self):
+        with Queue(4) as q:
+            def states():
+                return dict(q.rows())
+            a = q.start("a", 1)
+            q.pids("a")
+            b = q.start("b", 1)
+            q.pids("b")
+            # n needs one more CPU. Small jobs that may run for good would
+            # take every CPU that frees, so they wait behind n.
+            n = q.start("n", 3)
+            q.wait_rows(3)
+            s1 = q.start("s1", 1)
+            q.wait_rows(4)
+            time.sleep(0.15)
+            self.assertEqual(states(), {0: "running", 1: "running", 2: "queued", 3: "queued"})
+            q.release("a")
+            self.assertEqual(a.wait(timeout=3), 0)
+            q.pids("n")
+            self.assertEqual(states(), {1: "running", 2: "running", 3: "queued"})
+            q.release("b")
+            self.assertEqual(b.wait(timeout=3), 0)
+            q.pids("s1")
+            for name, p in (("n", n), ("s1", s1)):
+                q.release(name)
+                self.assertEqual(p.wait(timeout=3), 0)
+
+    def test_tag_does_not_change_the_order(self):
+        with Queue(4) as q:
+            def states():
+                return dict(q.rows())
+            for _ in range(2):
+                self.assertEqual(q.call("run", "-c", "1", "--tag", "t", "true")[0], 0)
+            a = q.start("a", 2, estimate="1h")
+            q.pids("a")
+            b = q.start("b")
+            q.wait_rows(2)
+            # Earlier jobs tagged t ended at once, but that says nothing
+            # about c: without an estimate it may hold b's CPU for good.
+            c = q.start("c", 1, tag="t")
+            q.wait_rows(3)
+            time.sleep(0.15)
+            self.assertEqual(states(), {2: "running", 3: "queued", 4: "queued"})
+            q.release("a")
+            self.assertEqual(a.wait(timeout=3), 0)
+            for name, p in (("b", b), ("c", c)):
+                q.pids(name)
+                q.release(name)
+                self.assertEqual(p.wait(timeout=3), 0)
+
+    def test_overrun_is_expected_to_last_a_minute_more(self):
+        with Queue(4) as q:
+            def states():
+                return dict(q.rows())
+            a = q.start("a", 2, estimate="1s")
+            q.pids("a")
+            time.sleep(1.3)
+            # a is past its estimate, so it is expected to end a minute later,
+            # and b could start then.
+            b = q.start("b")
+            q.wait_rows(2)
+            c = q.start("c", 2, estimate="2m")
+            q.wait_rows(3)
+            d = q.start("d", 1, estimate="20s")
+            q.pids("d")
+            time.sleep(0.15)
+            self.assertEqual(states(), {0: "running", 1: "queued", 2: "queued", 3: "running"})
+            for name, p in (("d", d), ("a", a)):
+                q.release(name)
+                self.assertEqual(p.wait(timeout=3), 0)
+            for name, p in (("b", b), ("c", c)):
+                q.pids(name)
+                q.release(name)
+                self.assertEqual(p.wait(timeout=3), 0)
+
+    def test_overrun_wakes_the_queue(self):
+        with Queue(4) as q:
+            a = q.start("a", 2, estimate="2s")
+            q.pids("a")
+            b = q.start("b")
+            q.wait_rows(2)
+            # c would hold b back while a is expected to end in two seconds.
+            c = q.start("c", 2, estimate="30s")
+            q.wait_rows(3)
+            time.sleep(0.15)
+            self.assertFalse((q.path / "c.pids").exists())
+            # Once a overruns, b is expected a minute later, so c can start,
+            # with no junban command to wake the queue.
+            time.sleep(2.5)
+            q.pids("c")
+            for name, p in (("c", c), ("a", a), ("b", b)):
                 if name == "b":
                     q.pids("b")
                 q.release(name)
                 self.assertEqual(p.wait(timeout=3), 0)
 
-    def test_backfill_needs_estimates_of_the_running_jobs(self):
+    def test_nothing_passes_a_job_without_cpus_whose_start_is_unknown(self):
         with Queue(4) as q:
+            def states():
+                return dict(q.rows())
             a = q.start("a", 2)
             q.pids("a")
-            # b's start depends on a, which has no estimate, so nothing
-            # can be sure to end before it.
+            # b was started without -c and waits for a, whose end no one
+            # knows. c could still run when a ends, so it does not start.
             b = q.start("b")
             q.wait_rows(2)
-            c = q.start("c", 1, estimate="1s")
+            c = q.start("c", 1, estimate="1m")
             q.wait_rows(3)
             time.sleep(0.15)
             self.assertFalse((q.path / "c.pids").exists())
-            for name, p in (("a", a), ("b", b), ("c", c)):
-                if name != "a":
-                    q.pids(name)
-                q.release(name)
-                self.assertEqual(p.wait(timeout=3), 0)
-
-    def test_backfill_stops_when_a_job_overruns(self):
-        with Queue(4) as q:
-            a = q.start("a", 2, estimate="1s")
-            q.pids("a")
-            time.sleep(1.3)
-            # a is past its estimate, so it may end any moment and b could
-            # start then. Nothing borrows the free CPUs.
-            b = q.start("b")
-            q.wait_rows(2)
-            c = q.start("c", 2, estimate="1h")
-            d = q.start("d", 1, estimate="1s")
-            q.wait_rows(4)
-            time.sleep(0.15)
-            for name in ("b", "c", "d"):
-                self.assertFalse((q.path / (name + ".pids")).exists())
             q.release("a")
             self.assertEqual(a.wait(timeout=3), 0)
-            for name, p in (("b", b), ("c", c), ("d", d)):
+            q.pids("b")
+            self.assertEqual(states(), {1: "running", 2: "queued"})
+            for name, p in (("b", b), ("c", c)):
                 q.pids(name)
                 q.release(name)
                 self.assertEqual(p.wait(timeout=3), 0)
 
+    def test_gpu_job_lines_up_ahead_of_cpu_jobs(self):
+        with Queue(4) as q:
+            r1 = q.start("r1", 2)
+            q.pids("r1")
+            r2 = q.start("r2", 2)
+            q.pids("r2")
+            s = q.start("s", 2)
+            q.wait_rows(3)
+            # g can run beside s, so it lines up ahead of it, and the GPU
+            # does not sit idle while s runs. No job needs an estimate.
+            g = q.start("g", 2, gpus=1)
+            self.assertEqual(q.wait_rows(4), [(0, "running"), (1, "running"),
+                                              (3, "queued"), (2, "queued")])
+            q.release("r1")
+            self.assertEqual(r1.wait(timeout=3), 0)
+            q.pids("g")
+            time.sleep(0.15)
+            self.assertEqual(dict(q.rows()), {1: "running", 2: "queued", 3: "running"})
+            q.release("r2")
+            self.assertEqual(r2.wait(timeout=3), 0)
+            q.pids("s")
+            for name, p in (("g", g), ("s", s)):
+                q.release(name)
+                self.assertEqual(p.wait(timeout=3), 0)
+
+    def test_cpu_job_runs_beside_gpu_jobs_that_keep_waiting(self):
+        with Queue(4) as q:
+            r = q.start("r")
+            q.pids("r")
+            c = q.start("c", 2)
+            q.wait_rows(2)
+            g1 = q.start("g1", 2, gpus=1)
+            q.wait_rows(3)
+            g2 = q.start("g2", 2, gpus=1)
+            self.assertEqual(q.wait_rows(4), [(0, "running"), (2, "queued"),
+                                              (3, "queued"), (1, "queued")])
+            q.release("r")
+            self.assertEqual(r.wait(timeout=3), 0)
+            # g2 waits only for the GPU. It keeps no CPUs free, so c runs
+            # beside g1 however many GPU jobs wait.
+            q.pids("g1")
+            q.pids("c")
+            self.assertEqual(dict(q.rows()), {1: "running", 2: "running", 3: "queued"})
+            q.release("g1")
+            self.assertEqual(g1.wait(timeout=3), 0)
+            q.pids("g2")
+            for name, p in (("c", c), ("g2", g2)):
+                q.release(name)
+                self.assertEqual(p.wait(timeout=3), 0)
+
+    def test_gpu_job_stays_behind_jobs_it_cannot_run_beside(self):
+        with Queue(4) as q:
+            r = q.start("r")
+            q.pids("r")
+            jobs = {"r": r}
+            def queue(name, *args, **kwargs):
+                jobs[name] = q.start(name, *args, **kwargs)
+                return [i for i, state in q.wait_rows(len(jobs)) if state == "queued"]
+            queue("c1", 1)
+            queue("b", 3)
+            queue("c2", 1)
+            # g1 would leave b too few CPUs, so it passes only c2.
+            self.assertEqual(queue("g1", 2, gpus=1), [1, 2, 4, 3])
+            # g2 stays behind g1, which uses the GPU too.
+            self.assertEqual(queue("g2", 1, gpus=1), [1, 2, 4, 5, 3])
+            # Nothing runs beside e, which takes all CPUs.
+            queue("e")
+            self.assertEqual(queue("g3", 1, gpus=1), [1, 2, 4, 5, 3, 6, 7])
+            q.release("r")
+            self.assertEqual(r.wait(timeout=3), 0)
+            for name in ("c1", "b", "g1", "g2", "c2", "e", "g3"):
+                q.pids(name)
+                q.release(name)
+                self.assertEqual(jobs[name].wait(timeout=3), 0)
+
+    def test_delay_stays_within_slack(self):
+        with Queue(8) as q:
+            def states():
+                return dict(q.rows())
+            r = q.start("r", 4, estimate="1h")
+            q.pids("r")
+            # b can start when r ends; it has 12 minutes of slack.
+            b = q.start("b", 8, estimate="1h")
+            q.wait_rows(2)
+            # y would hold b back an hour, so it waits.
+            y = q.start("y", 2, estimate="2h")
+            q.wait_rows(3)
+            # x1 and x2 together hold b back 10 minutes.
+            x1 = q.start("x1", 2, estimate="65m")
+            q.pids("x1")
+            x2 = q.start("x2", 2, estimate="70m")
+            q.pids("x2")
+            q.release("x1")
+            self.assertEqual(x1.wait(timeout=3), 0)
+            # x3 would make it 20 minutes in all, past b's slack.
+            x3 = q.start("x3", 2, estimate="80m")
+            q.wait_rows(5)
+            time.sleep(0.15)
+            self.assertEqual(states(), {0: "running", 1: "queued", 2: "queued",
+                                        4: "running", 5: "queued"})
+            for name, p in (("x2", x2), ("r", r)):
+                q.release(name)
+                self.assertEqual(p.wait(timeout=3), 0)
+            q.pids("b")
+            q.release("b")
+            self.assertEqual(b.wait(timeout=3), 0)
+            for name, p in (("y", y), ("x3", x3)):
+                q.pids(name)
+                q.release(name)
+                self.assertEqual(p.wait(timeout=3), 0)
+
+    def test_job_that_cannot_start_yet_does_not_block_others(self):
+        with Queue(4) as q:
+            def states():
+                return dict(q.rows())
+            r = q.start("r", 1, gpus=1, estimate="1h")
+            q.pids("r")
+            a = q.start("a", 1, estimate="1h")
+            q.pids("a")
+            # b can start when r and a end; its slack is 12 minutes.
+            b = q.start("b", 3, estimate="1h")
+            q.wait_rows(3)
+            # n has no estimate, so once r ends it holds the GPU for good, and
+            # x, behind it, has no start in the plan at all.
+            n = q.start("n", 1, gpus=1)
+            q.wait_rows(4)
+            x = q.start("x", 1, gpus=1, estimate="1m")
+            q.wait_rows(5)
+            # c holds b back 5 minutes, within its slack, and leaves n its CPU.
+            # x has no planned start, so it has none to lose.
+            c = q.start("c", 2, estimate="65m")
+            q.pids("c")
+            self.assertEqual(states(), {0: "running", 1: "running", 2: "queued",
+                                        3: "queued", 4: "queued", 5: "running"})
+            for name, p in (("r", r), ("a", a), ("c", c)):
+                q.release(name)
+                self.assertEqual(p.wait(timeout=3), 0)
+            for name, p in (("b", b), ("n", n), ("x", x)):
+                q.pids(name)
+                q.release(name)
+                self.assertEqual(p.wait(timeout=3), 0)
 
     def server_args(self, q):
         return subprocess.run(["ps", "-p", str(q.server()), "-o", "args="],
@@ -1121,7 +1384,7 @@ class VisibilityOnlyTests(unittest.TestCase):
                            "ls     0 if it listed a job, 1 if it listed none"):
                 self.assertIn(phrase, text)
             self.assertLessEqual(max(map(len, text.splitlines())), 100)
-            self.assertEqual(q.call("version")[1], b"junban 0.4.0 (based on task-spooler 1.0.4)\n")
+            self.assertEqual(q.call("version")[1], b"junban 0.5.0 (based on task-spooler 1.0.4)\n")
             self.assertEqual(q.call("ls", "--summary"), (0, b"cpus 0/4 gpus 0/1 running 0 queued 0\n", b""))
             for args in (["--summary", "-a"], ["-a", "-a"], ["--summary", "--summary"]):
                 self.own_failure(q.call("ls", *args))
