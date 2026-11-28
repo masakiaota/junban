@@ -200,7 +200,6 @@ static struct Job * newjobptr()
     return p->next;
 }
 
-/* Returns job id or -1 on error */
 /* Read a NUL-terminated string of size bytes into a new buffer, or leave
  * *dst NULL for size 0. Returns 0 if the client went away. */
 static int recv_string(int s, int size, char **dst)
@@ -213,6 +212,26 @@ static int recv_string(int s, int size, char **dst)
     return 1;
 }
 
+/* A job joins the end of the line. A job that uses a GPU instead lines up
+ * ahead of the waiting jobs that can run beside it, so the GPU does not sit
+ * idle while they use the CPUs. They lose only the CPUs it asks for, since no
+ * more GPU jobs run at once than there are GPUs. It stays behind a waiting
+ * job that uses a GPU too, and behind one it would leave too few CPUs. */
+static void line_up(struct Job *job)
+{
+    struct Job **p, **place = NULL; /* The link to the first job it goes ahead of. */
+    for (p = &firstjob; *p != job; p = &(*p)->next) {
+        if ((*p)->state != QUEUED) continue;
+        if ((*p)->num_gpus || (*p)->num_slots + job->num_slots > max_slots) place = NULL;
+        else if (!place) place = p;
+    }
+    if (!job->num_gpus || !place) return;
+    *p = NULL;
+    job->next = *place;
+    *place = job;
+}
+
+/* Returns job id or -1 on error */
 int s_newjob(int s, struct msg *m)
 {
     struct Job *p;
@@ -237,6 +256,7 @@ int s_newjob(int s, struct msg *m)
     p->delayed = 0;
     p->num_slots = p->cpus_unspecified ? max_slots : m->u.newjob.num_slots;
     p->num_gpus = m->u.newjob.num_gpus;
+    line_up(p);
     p->pid = 0;
     p->kill_requested = 0;
     p->should_keep_finished = p->state != HOLDING_CLIENT;
@@ -275,7 +295,7 @@ disconnected:
 
 /* Scheduling.
  *
- * Jobs start in the order they were submitted. A job starts ahead of others
+ * Jobs start in the order of the line (line_up). A job starts ahead of others
  * only if that costs each waiting job no more than its slack: a fifth of the
  * time it was said to take (--estimate). A job started without -c, often a
  * benchmark, and a job of unknown length have no slack.
@@ -286,12 +306,15 @@ disconnected:
  * needs more than that has no planned start yet: until it has one, jobs of
  * known length may start ahead of it, since they end. A job of unknown
  * length starts ahead of a waiting job only if all jobs of unknown length
- * together leave that job what it asks for.
+ * together leave that job what it asks for. Nothing starts ahead of a job
+ * started without -c that has no planned start: junban cannot tell what
+ * would make it start later.
  *
- * The plan places the waiting jobs in queue order, each at the earliest time
- * it fits without moving an earlier one. What starting a job ahead costs a
- * waiting job is how much later the plan then starts it. A job that ends
- * early or late moves the plan too, but that uses up no one's slack. */
+ * The plan places the waiting jobs in the order of the line, each at the
+ * earliest time it fits without moving an earlier one. What starting a job
+ * ahead costs a waiting job is how much later the plan then starts it. A job
+ * that ends early or late moves the plan too, but that uses up no one's
+ * slack. */
 
 #define SLACK_SHARE 0.2
 
@@ -390,29 +413,38 @@ static double plan_fit(const struct Plan *pl, const struct Job *job)
     return INFINITY;
 }
 
-/* Place the waiting jobs in queue order. With no job started ahead, note
- * each planned start. With one, note how much later each job then starts,
- * and return 0 once that is more than the job's slack has left.
+/* Place the waiting jobs in the order of the line. With no job started
+ * ahead, note each planned start. With one, note how much later each job
+ * then starts, and return 0 once that is more than the job's slack has left.
  *
  * A job of unknown length may hold what it takes for good. So it gets a
  * place only if what then stays free for good, the last step, still covers
  * each job ahead of it that has no place, of whatever it uses itself. A job
- * ahead that has a place is covered by its planned start. */
+ * ahead that has a place is covered by its planned start.
+ *
+ * Behind a job started without -c that has no place, no job gets one, and
+ * none starts. */
 static int plan_waiting(struct Plan *pl, const struct Job *ahead)
 {
     int most_cpus = 0, most_gpus = 0; /* The most a job with no place asks for. */
+    int shut = 0; /* Whether a job started without -c has no place. */
     struct Job *p;
     for (p = firstjob; p; p = p->next) {
         const struct Step *last = &pl->step[pl->n - 1];
         double start = INFINITY;
-        if (p->state != QUEUED || p == ahead) continue;
-        if (p->estimate ||
-            (last->cpus - p->num_slots >= most_cpus &&
-             (!p->num_gpus || last->gpus - p->num_gpus >= most_gpus)))
+        if (p->state != QUEUED) continue;
+        if (p == ahead) {
+            if (shut) return 0;
+            continue;
+        }
+        if (!shut && (p->estimate ||
+                      (last->cpus - p->num_slots >= most_cpus &&
+                       (!p->num_gpus || last->gpus - p->num_gpus >= most_gpus))))
             start = plan_fit(pl, p);
         if (start == INFINITY) {
             if (p->num_slots > most_cpus) most_cpus = p->num_slots;
             if (p->num_gpus > most_gpus) most_gpus = p->num_gpus;
+            shut |= p->cpus_unspecified;
         }
         if (!ahead) p->planned = start;
         else {
@@ -425,52 +457,28 @@ static int plan_waiting(struct Plan *pl, const struct Job *ahead)
     return 1;
 }
 
-/* How much of the machine a job fills. The GPU counts as much as all CPUs:
- * it is the scarcer, and every job that uses it uses a CPU too. */
-static double fill(const struct Job *job)
-{
-    return (double)job->num_slots / max_slots +
-           (max_gpus ? (double)job->num_gpus / max_gpus : 0);
-}
-
-static int fuller_first(const void *a, const void *b)
-{
-    const struct Job *x = *(const struct Job *const *)a, *y = *(const struct Job *const *)b;
-    if (fill(x) != fill(y)) return fill(x) < fill(y) ? 1 : -1;
-    return (x->jobid > y->jobid) - (x->jobid < y->jobid);
-}
-
-/* The job to start now, or -1. Of the jobs that may start, the one that
- * fills the most of the machine goes first, so the GPU does not sit idle
- * behind CPU jobs that can wait. */
+/* The job to start now, or -1: the first in the line that fits and may
+ * start. The first waiting job costs no one anything, so it may. */
 int next_run_job(void)
 {
     int free_cpus = max_slots - busy_slots, free_gpus = max_gpus - busy_gpus;
     double now = looked_at = monotime();
     struct Plan pl = {0};
-    struct Job *p, **fits, *chosen = NULL;
-    int n = 0, i;
-    for (p = firstjob; p; p = p->next) n += p->state == QUEUED;
-    if (!(fits = malloc((size_t)(n + 1) * sizeof(*fits))))
-        error("Cannot allocate memory in next_run_job");
-    n = 0;
-    for (p = firstjob; p; p = p->next)
-        if (p->state == QUEUED && !p->kill_requested && p->num_slots <= free_cpus &&
-            p->num_gpus <= free_gpus)
-            fits[n++] = p;
-    if (n) {
-        qsort(fits, (size_t)n, sizeof(*fits), fuller_first);
-        plan_running(&pl, now, NULL);
-        plan_waiting(&pl, NULL);
+    struct Job *p, *chosen = NULL;
+    for (p = firstjob; p && !chosen; p = p->next) {
+        if (p->state != QUEUED || p->kill_requested || p->num_slots > free_cpus ||
+            p->num_gpus > free_gpus)
+            continue;
+        if (!pl.n) {
+            plan_running(&pl, now, NULL);
+            plan_waiting(&pl, NULL);
+        }
+        /* A job of unknown length that the plan gives no place would not
+         * leave a job ahead of it enough, so it does not start. */
+        if (!p->estimate && p->planned == INFINITY) continue;
+        plan_running(&pl, now, p);
+        if (plan_waiting(&pl, p)) chosen = p;
     }
-    /* A job of unknown length that the plan gives no place would not leave
-     * a job ahead of it enough, so it does not start. */
-    for (i = 0; i < n && !chosen; ++i) {
-        if (!fits[i]->estimate && fits[i]->planned == INFINITY) continue;
-        plan_running(&pl, now, fits[i]);
-        if (plan_waiting(&pl, fits[i])) chosen = fits[i];
-    }
-    free(fits);
     free(pl.step);
     if (!chosen) return -1;
     for (p = firstjob; p; p = p->next)

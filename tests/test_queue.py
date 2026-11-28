@@ -540,43 +540,13 @@ class QueueTests(unittest.TestCase):
                 q.release(name)
                 self.assertEqual(p.wait(timeout=3), 0)
 
-    def test_job_with_no_place_may_still_start_ahead(self):
-        with Queue(4) as q:
-            def states():
-                return dict(q.rows())
-            r = q.start("r", 1, estimate="10m")
-            q.pids("r")
-            x = q.start("x", 3)
-            q.pids("x")
-            b = q.start("b", 2, estimate="1h")
-            q.wait_rows(3)
-            n = q.start("n", 2)
-            q.wait_rows(4)
-            # The plan starts b now and n when r ends, which leaves g no
-            # place. Started now, g holds b back nine minutes of its 12 of
-            # slack, and n not at all.
-            g = q.start("g", 3, gpus=1, estimate="9m")
-            q.wait_rows(5)
-            q.release("x")
-            self.assertEqual(x.wait(timeout=3), 0)
-            q.pids("g")
-            time.sleep(0.15)
-            self.assertEqual(states(), {0: "running", 2: "queued", 3: "queued", 4: "running"})
-            for name, p in (("g", g), ("r", r)):
-                q.release(name)
-                self.assertEqual(p.wait(timeout=3), 0)
-            for name, p in (("b", b), ("n", n)):
-                q.pids(name)
-                q.release(name)
-                self.assertEqual(p.wait(timeout=3), 0)
-
     def test_unknown_end_lets_estimated_jobs_go_ahead(self):
         with Queue(4) as q:
             a = q.start("a", 2)
             q.pids("a")
             # b's start depends on a, which has no estimate. Until a ends,
             # any job with an estimate ends before b could start.
-            b = q.start("b")
+            b = q.start("b", 4)
             q.wait_rows(2)
             c = q.start("c", 1, estimate="1h")
             q.pids("c")
@@ -687,56 +657,78 @@ class QueueTests(unittest.TestCase):
                 q.release(name)
                 self.assertEqual(p.wait(timeout=3), 0)
 
-    def test_gpu_job_goes_ahead_within_slack(self):
+    def test_nothing_passes_a_job_without_cpus_whose_start_is_unknown(self):
         with Queue(4) as q:
             def states():
                 return dict(q.rows())
-            r1 = q.start("r1", 2, estimate="1h")
-            q.pids("r1")
-            r2 = q.start("r2", 2, estimate="5m")
-            q.pids("r2")
-            # s could take r1's CPUs first. Starting g instead puts the GPU to
-            # use and makes s wait for r2, five minutes of its 12 of slack.
-            s = q.start("s", 2, estimate="1h")
+            a = q.start("a", 2)
+            q.pids("a")
+            # b was started without -c and waits for a, whose end no one
+            # knows. c could still run when a ends, so it does not start.
+            b = q.start("b")
+            q.wait_rows(2)
+            c = q.start("c", 1, estimate="1m")
             q.wait_rows(3)
-            g = q.start("g", 2, gpus=1, estimate="1h")
-            q.wait_rows(4)
-            q.release("r1")
-            self.assertEqual(r1.wait(timeout=3), 0)
-            q.pids("g")
             time.sleep(0.15)
-            self.assertEqual(states(), {1: "running", 2: "queued", 3: "running"})
-            for name, p in (("r2", r2), ("g", g)):
+            self.assertFalse((q.path / "c.pids").exists())
+            q.release("a")
+            self.assertEqual(a.wait(timeout=3), 0)
+            q.pids("b")
+            self.assertEqual(states(), {1: "running", 2: "queued"})
+            for name, p in (("b", b), ("c", c)):
+                q.pids(name)
                 q.release(name)
                 self.assertEqual(p.wait(timeout=3), 0)
-            q.pids("s")
-            q.release("s")
-            self.assertEqual(s.wait(timeout=3), 0)
 
-    def test_gpu_job_waits_beyond_slack(self):
+    def test_gpu_job_lines_up_ahead_of_cpu_jobs(self):
         with Queue(4) as q:
-            def states():
-                return dict(q.rows())
-            r1 = q.start("r1", 2, estimate="1h")
+            r1 = q.start("r1", 2)
             q.pids("r1")
-            r2 = q.start("r2", 2, estimate="5m")
+            r2 = q.start("r2", 2)
             q.pids("r2")
-            # s has 12 seconds of slack, so it cannot wait for r2.
-            s = q.start("s", 2, estimate="1m")
+            s = q.start("s", 2)
             q.wait_rows(3)
-            g = q.start("g", 2, gpus=1, estimate="1h")
-            q.wait_rows(4)
+            # g can run beside s, so it lines up ahead of it, and the GPU
+            # does not sit idle while s runs. No job needs an estimate.
+            g = q.start("g", 2, gpus=1)
+            self.assertEqual(q.wait_rows(4), [(0, "running"), (1, "running"),
+                                              (3, "queued"), (2, "queued")])
             q.release("r1")
             self.assertEqual(r1.wait(timeout=3), 0)
-            q.pids("s")
+            q.pids("g")
             time.sleep(0.15)
-            self.assertEqual(states(), {1: "running", 2: "running", 3: "queued"})
-            for name, p in (("s", s), ("r2", r2)):
+            self.assertEqual(dict(q.rows()), {1: "running", 2: "queued", 3: "running"})
+            q.release("r2")
+            self.assertEqual(r2.wait(timeout=3), 0)
+            q.pids("s")
+            for name, p in (("g", g), ("s", s)):
                 q.release(name)
                 self.assertEqual(p.wait(timeout=3), 0)
-            q.pids("g")
-            q.release("g")
-            self.assertEqual(g.wait(timeout=3), 0)
+
+    def test_gpu_job_stays_behind_jobs_it_cannot_run_beside(self):
+        with Queue(4) as q:
+            r = q.start("r")
+            q.pids("r")
+            jobs = {"r": r}
+            def queue(name, *args, **kwargs):
+                jobs[name] = q.start(name, *args, **kwargs)
+                return [i for i, state in q.wait_rows(len(jobs)) if state == "queued"]
+            queue("c1", 1)
+            queue("b", 3)
+            queue("c2", 1)
+            # g1 would leave b too few CPUs, so it passes only c2.
+            self.assertEqual(queue("g1", 2, gpus=1), [1, 2, 4, 3])
+            # g2 stays behind g1, which uses the GPU too.
+            self.assertEqual(queue("g2", 1, gpus=1), [1, 2, 4, 5, 3])
+            # Nothing runs beside e, which takes all CPUs.
+            queue("e")
+            self.assertEqual(queue("g3", 1, gpus=1), [1, 2, 4, 5, 3, 6, 7])
+            q.release("r")
+            self.assertEqual(r.wait(timeout=3), 0)
+            for name in ("c1", "b", "g1", "g2", "c2", "e", "g3"):
+                q.pids(name)
+                q.release(name)
+                self.assertEqual(jobs[name].wait(timeout=3), 0)
 
     def test_delay_stays_within_slack(self):
         with Queue(8) as q:

@@ -15,15 +15,20 @@ v0.5.0 (scheduling by slack):
    job, so however many jobs start ahead of it, a job is delayed by no
    more than its slack. A job started without -c and a job without an
    estimate have no slack.
- - Of the jobs that may start, the one that fills the most of the free
-   CPUs and GPU goes first, the GPU counting as much as all CPUs. A GPU
-   job no longer leaves the GPU idle behind CPU jobs that can wait.
+ - A job that uses the GPU lines up ahead of the waiting jobs that can
+   run beside it, so the GPU is no longer left idle behind CPU jobs. They
+   give up only the CPUs it asks for. It stays behind earlier GPU jobs
+   and behind a job that cannot run beside it, such as one started
+   without -c. This needs no estimates. junban ls lists the waiting jobs
+   in the order of the line, so job IDs there are no longer in order.
  - junban counts only on what it was told: a job without an estimate may
    run for good. It starts ahead of a waiting job only if all jobs
    without an estimate together leave that job what it asks for. While a
    waiting job waits for one of them to end, jobs with an estimate may
-   start ahead of it. With no estimates at all, jobs keep their order as
-   before. Tags and directories never change the order.
+   start ahead of it, unless it was started without -c: nothing starts
+   ahead of such a job while its start is unknown. With no estimates at
+   all, CPU jobs keep their order as before. Tags and directories never
+   change the order.
  - A running job past its estimate is expected to end a minute later,
    then 15, 30 and 60 minutes later, and so on, instead of at once, and
    the server wakes at those times. This uses up no one's slack.
