@@ -6,6 +6,19 @@ agent-readable listings and wait notifications, a terminal watch view, and macOS
 idle-sleep prevention. Removed the old command-line interface and obsolete
 packaging, output capture, mail, dependencies, and queue-reordering features.
 
+v0.6.0 (latest starts in listings):
+ - junban ls shows start-by= for a queued job: the latest it starts as
+   the plan stands, which is its planned start plus the slack it has
+   left, with the date before the time unless it is today. junban watch
+   shows it as "by", and the wait notice of junban run ends with a "to
+   start by" line. Each command shows the time in its own time zone. The
+   time moves when a running job ends early or late, or when a GPU job
+   lines up ahead. Nothing is shown while the job has no planned start,
+   because it waits for a job without an estimate to end, or when the
+   time is decades away.
+ - Protocol change, so a 0.5.x server cannot switch to 0.6.0 in place.
+   Stop it with junban shutdown once, when no jobs are running or queued.
+
 v0.5.0 (scheduling by slack):
  - Replaces EASY backfilling, which protected only the first waiting job
    and protected it to the second. Now every waiting job has slack, a

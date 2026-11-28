@@ -193,6 +193,12 @@ int c_wait_server_commands()
         }
         if (m.type == NOTICE_END) {
             if (command_line.detach) continue;
+            if (m.u.start_by.low || m.u.start_by.high) {
+                char clock[32];
+                format_clock(clock, sizeof(clock),
+                             (long long)m.u.start_by.high << 32 | m.u.start_by.low, " ");
+                fprintf(stderr, "junban: id=%d queued, to start by %s\n", command_line.jobid, clock);
+            }
             waited = 1;
             next_notice = monotime() + interval;
             continue;

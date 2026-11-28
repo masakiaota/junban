@@ -213,6 +213,13 @@ static void timing_text(struct row *r, const struct Job_view *v, int section, in
                 put(r, "", estimate);
             }
         }
+        if (v->start_by) {
+            format_clock(text, sizeof(text), v->start_by, " ");
+            if (r->columns + 5 + (int)strlen(text) <= end) {
+                put(r, MUTED, "  by ");
+                put(r, "", text);
+            }
+        }
         return;
     }
     if (section == 2) {
@@ -228,11 +235,8 @@ static void timing_text(struct row *r, const struct Job_view *v, int section, in
         pad_to(r, start + 9 > r->columns + 1 ? start + 9 : r->columns + 1);
         put(r, quiet, elapsed);
         if (v->ended) {
-            time_t ended = (time_t)v->ended, now = time(NULL);
-            struct tm then = *localtime(&ended), today = *localtime(&now);
-            strftime(text, sizeof(text), then.tm_year == today.tm_year &&
-                     then.tm_yday == today.tm_yday ? "  ended %H:%M" : "  ended %m-%d %H:%M",
-                     &then);
+            format_clock(tail, sizeof(tail), v->ended, " ");
+            snprintf(text, sizeof(text), "  ended %s", tail);
             put(r, MUTED, text);
         }
         return;

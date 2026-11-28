@@ -820,6 +820,57 @@ class QueueTests(unittest.TestCase):
                 q.release(name)
                 self.assertEqual(p.wait(timeout=3), 0)
 
+    def test_ls_shows_when_a_queued_job_is_to_start_by(self):
+        import datetime
+        def start_by(rows, jobid):
+            for line in rows.splitlines():
+                if line.startswith("queued id=%d " % jobid):
+                    m = re.search(r" start-by=(?:(\d\d)-(\d\d)T)?(\d\d):(\d\d) ", line)
+                    if not m:
+                        return None
+                    now = datetime.datetime.now()
+                    month, day = (int(m[1]), int(m[2])) if m[1] else (now.month, now.day)
+                    year = now.year + (month < now.month)
+                    return datetime.datetime(year, month, day, int(m[3]), int(m[4]))
+            raise AssertionError(rows)
+        with Queue(4) as q:
+            a = q.start("a", 2, estimate="1h")
+            q.pids("a")
+            # b starts by a's end plus its slack, a fifth of its own hour.
+            b = q.start("b", 4, estimate="1h")
+            q.wait_rows(2)
+            listed = eventually(lambda: (out if b" start-by=" in (out := q.call("ls")[1]) else None))
+            latest = start_by(listed.decode(), 1)
+            expected = datetime.datetime.fromtimestamp(time.time() + 72 * 60)
+            self.assertLess(abs((latest - expected).total_seconds()), 120)
+            env = dict(q.env, JUNBAN_NOTIFY_SEC="60")
+            c = q.start("c", 3, estimate="1m", env=env)
+            notice = read_until(c.stderr, lambda data: b"to start by" in data and data.endswith(b"\n"))
+            self.assertRegex(notice.decode(), r"junban: id=2 queued, to start by (\d\d-\d\d )?\d\d:\d\d\n$")
+            for name, p in (("a", a), ("b", b), ("c", c)):
+                if name != "a":
+                    q.pids(name)
+                q.release(name)
+                self.assertEqual(p.wait(timeout=3), 0)
+        with Queue(4) as q:
+            a = q.start("a", 2)
+            q.pids("a")
+            # b waits on a, whose end is unknown, so it has no planned start.
+            # Nor has c, which may not take a CPU that b waits for.
+            b = q.start("b")
+            q.wait_rows(2)
+            c = q.start("c", 1)
+            q.wait_rows(3)
+            time.sleep(0.15)
+            listed = q.call("ls")[1].decode()
+            self.assertIsNone(start_by(listed, 1))
+            self.assertIsNone(start_by(listed, 2))
+            for name, p in (("a", a), ("b", b), ("c", c)):
+                if name != "a":
+                    q.pids(name)
+                q.release(name)
+                self.assertEqual(p.wait(timeout=3), 0)
+
     def server_args(self, q):
         return subprocess.run(["ps", "-p", str(q.server()), "-o", "args="],
                               capture_output=True, text=True).stdout
@@ -1384,7 +1435,7 @@ class VisibilityOnlyTests(unittest.TestCase):
                            "ls     0 if it listed a job, 1 if it listed none"):
                 self.assertIn(phrase, text)
             self.assertLessEqual(max(map(len, text.splitlines())), 100)
-            self.assertEqual(q.call("version")[1], b"junban 0.5.0 (based on task-spooler 1.0.4)\n")
+            self.assertEqual(q.call("version")[1], b"junban 0.6.0 (based on task-spooler 1.0.4)\n")
             self.assertEqual(q.call("ls", "--summary"), (0, b"cpus 0/4 gpus 0/1 running 0 queued 0\n", b""))
             for args in (["--summary", "-a"], ["-a", "-a"], ["--summary", "--summary"]):
                 self.own_failure(q.call("ls", *args))
@@ -1902,8 +1953,8 @@ class VisibilityOnlyTests(unittest.TestCase):
             self.assertEqual(q.call("ls", "--summary"), (0, b"cpus 3/4 gpus 0/1 running 1 queued 2\n", b""))
             self.assertEqual(len(lines), 3)
             self.assertRegex(lines[0], r"^running id=0 dir=\S+ cpus=3 gpus=0 elapsed=\d+s est=1s(?: over)? cmd=.+")
-            self.assertRegex(lines[1], r"^queued id=1 dir=\S+ cpus=all\(4\) gpus=0 waited=\d+s est=2m cmd=.+")
-            self.assertRegex(lines[2], r"^queued id=2 dir=\S+ cpus=1 gpus=0 waited=\d+s cmd=.+")
+            self.assertRegex(lines[1], r"^queued id=1 dir=\S+ cpus=all\(4\) gpus=0 waited=\d+s est=2m start-by=\S+ cmd=.+")
+            self.assertRegex(lines[2], r"^queued id=2 dir=\S+ cpus=1 gpus=0 waited=\d+s start-by=\S+ cmd=.+")
             self.assertLessEqual(len(lines[0].split(" cmd=", 1)[1]), 80)
             eventually(lambda: " over " in self.listing(q)[0])
             self.assertIsNone(p.poll(), "estimate must never stop the job")
@@ -2074,7 +2125,7 @@ class VisibilityOnlyTests(unittest.TestCase):
             self.assertIn(b"\x1b[94m" + directory.encode(), screen)
             self.assertIn(b"\x1b[35m gpus 1", screen)
             queued = clean.split("QUEUED 1", 1)[1].splitlines()
-            self.assertRegex(queued[2], r"waited \S+  est 2m +cpus all$")
+            self.assertRegex(queued[2], r"waited \S+  est 2m  by [\d: -]+ +cpus all$")
             done = clean.split("DONE", 1)[1].splitlines()
             self.assertRegex(done[1], r"^✓ +1  true 日本$")
             self.assertRegex(done[2], r" ok +\S+  ended \d\d:\d\d$")

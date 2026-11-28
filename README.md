@@ -31,7 +31,7 @@ This installs `$HOME/.local/bin/junban`. Without `PREFIX`, it installs under `/u
 
 Upgrade junban the way you installed it, with `brew upgrade junban` or `make install` again. The running server notices the new junban the next time any junban command connects to it, and switches to it in place. Running and queued jobs, finished results and job IDs are kept, and waiting commands stay connected.
 
-If the new junban speaks a different protocol, the server keeps running the old one. Stop it with `junban shutdown` when no jobs are running or queued. A server older than 0.4.0 cannot switch either, so after upgrading from one, run `junban shutdown` once at such a time.
+If the new junban speaks a different protocol, as 0.6.0 does, the server keeps running the old one. Stop it with `junban shutdown` when no jobs are running or queued. A server older than 0.4.0 cannot switch either, so after upgrading from one, run `junban shutdown` once at such a time.
 
 ## Usage
 
@@ -66,12 +66,13 @@ $ junban run -c 1 -g 1 python train_mps.py
 | `-c 1 -g 1` | 1 | 1 |
 | `-g 1` | all | 1 |
 
-If enough CPUs are free, the job starts right away. Otherwise it waits until they are. While it waits, junban shows what is going on, including whether it waits for CPUs, GPUs or both:
+If enough CPUs are free, the job starts right away. Otherwise it waits until they are. While it waits, junban shows what is going on, including whether it waits for CPUs, GPUs or both, and the latest time it starts, once junban can tell:
 
 ```console
 $ junban run python eval.py
 junban: id=1 queued, cpus=all(4), gpus=0, 1 ahead, waiting for cpus
 junban:   running id=0 dir=demo cpus=1 gpus=0 elapsed=0s est=30m
+junban: id=1 queued, to start by 14:50
 junban: id=1 started after 1s
 ```
 
@@ -139,10 +140,10 @@ $ junban kill --tag agent-1
 ```console
 $ junban ls
 running id=0 dir=demo cpus=1 gpus=0 elapsed=1s est=30m cmd=sleep 30
-queued id=1 dir=demo cpus=all(4) gpus=0 waited=1s est=5m cmd=sh -c echo evaluated
+queued id=1 dir=demo cpus=all(4) gpus=0 waited=1s est=5m start-by=14:50 cmd=sh -c echo evaluated
 ```
 
-`dir` is the name of the directory the job was started from. `cpus=all(4)` means the job was started without `-c`. `gpus=` is the number given with `-g`, 0 without it. A job that has run past its estimate is marked `over`. To see finished jobs as well, use `junban ls -a`; their lines start with `done`.
+`dir` is the name of the directory the job was started from. `cpus=all(4)` means the job was started without `-c`. `gpus=` is the number given with `-g`, 0 without it. A job that has run past its estimate is marked `over`. `start-by=` is the latest a queued job starts as things stand: its planned start plus the slack it has left (see [Good to know](#good-to-know)), with the date before the time (`11-28T09:15`) unless it is today. It moves when a running job ends early or runs past its estimate, or when a GPU job lines up ahead, and it is missing while the job waits for a job without an estimate to end. To see finished jobs as well, use `junban ls -a`; their lines start with `done`.
 
 Standard output of `junban ls` carries job lines only, and every line starts with the job's state: `running`, `queued` or `done`. When there are no jobs, it prints nothing. Like `grep`, `junban ls` exits with 0 when it listed at least one job, 1 when it listed none, and 125 for junban's own errors. To see how many CPUs and GPUs are in use, use `junban ls --summary`:
 
@@ -174,7 +175,7 @@ RUNNING 2
 
 QUEUED 1
   4  python eval.py --ckpt best.pt
-     AHC075-b/  waited 40s  est 10m                     cpus 1 gpus 1  #sweep
+     AHC075-b/  waited 40s  est 10m  by 14:50           cpus 1 gpus 1  #sweep
 
 DONE
 ✗ 2  pytest -x
@@ -183,7 +184,7 @@ DONE
      AHC075-a/  ok       0s  ended 14:20
 ```
 
-Each job takes two rows: its ID and command, then its directory, timing, the CPUs and GPUs it holds, and its tag. The directory column widens to fit the names on screen, up to 32 columns. A running job with an estimate shows a progress bar and the time left, or `OVER` once past it; a queued one shows its estimate. A finished job shows `✓` or `✗`, its result, and the time it ended. Colour marks meaning only: CPUs are cyan, GPUs magenta, directories blue, and anything wrong red. `NO_COLOR=1` turns colour off, and without a UTF-8 locale the screen uses ASCII only, with `?` for each non-ASCII character in job text. On a narrow terminal the tag is dropped first, then the timing shrinks; each piece shows whole or not at all.
+Each job takes two rows: its ID and command, then its directory, timing, the CPUs and GPUs it holds, and its tag. The directory column widens to fit the names on screen, up to 32 columns. A running job with an estimate shows a progress bar and the time left, or `OVER` once past it; a queued one shows its estimate and the latest time it starts. A finished job shows `✓` or `✗`, its result, and the time it ended. Colour marks meaning only: CPUs are cyan, GPUs magenta, directories blue, and anything wrong red. `NO_COLOR=1` turns colour off, and without a UTF-8 locale the screen uses ASCII only, with `?` for each non-ASCII character in job text. On a narrow terminal the tag is dropped first, then the timing shrinks; each piece shows whole or not at all.
 
 ### Stop a job
 
